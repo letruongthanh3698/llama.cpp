@@ -475,7 +475,7 @@ void llama_model::load_arch(llama_model_loader & ml) {
     }
 }
 
-void llama_model::load_hparams(llama_model_loader & ml) {
+void __attribute__((weak)) llama_model::load_hparams(llama_model_loader & ml) {
     const gguf_context * ctx = ml.meta.get();
 
     // get metadata as string
@@ -2200,7 +2200,7 @@ void llama_model::load_vocab(llama_model_loader & ml) {
     vocab.load(ml, kv);
 }
 
-bool llama_model::load_tensors(llama_model_loader & ml) {
+bool __attribute__((weak)) llama_model::load_tensors(llama_model_loader & ml) {
     const auto & split_mode   = params.split_mode;
     const auto & n_gpu_layers = params.n_gpu_layers;
     const auto & use_mlock    = params.use_mlock;
@@ -2214,8 +2214,20 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
 
     // build a list of buffer types for the CPU and GPU devices
     pimpl->cpu_buft_list = make_cpu_buft_list(devices, params.use_extra_bufts, params.no_host);
+    for (auto p : pimpl->cpu_buft_list) {
+        printf("%s: CPU buft: device %s, buft %s, alignment %zu\n", __func__,
+            ggml_backend_dev_name(p.first),
+            ggml_backend_buft_name(p.second),
+            ggml_backend_buft_get_alignment(p.second));
+    }
     for (auto * dev : devices) {
         buft_list_t buft_list = make_gpu_buft_list(dev, split_mode, tensor_split);
+        for (auto p : buft_list) {
+            printf("%s: GPU buft: device %s, buft %s, alignment %zu\n", __func__,
+                ggml_backend_dev_name(p.first),
+                ggml_backend_buft_name(p.second),
+                ggml_backend_buft_get_alignment(p.second));
+        }
         // add CPU buffer types as a fallback
         buft_list.insert(buft_list.end(), pimpl->cpu_buft_list.begin(), pimpl->cpu_buft_list.end());
         pimpl->gpu_buft_list.emplace(dev, std::move(buft_list));
@@ -6889,7 +6901,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
     return res;
 }
 
-ggml_cgraph * llama_model::build_graph(const llm_graph_params & params) const {
+ggml_cgraph * __attribute__((weak)) llama_model::build_graph(const llm_graph_params & params) const {
     std::unique_ptr<llm_graph_context> llm;
 
     switch (arch) {

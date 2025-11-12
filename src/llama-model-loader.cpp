@@ -919,7 +919,7 @@ void llama_model_loader::load_data_for(struct ggml_tensor * cur) const {
     }
 }
 
-bool llama_model_loader::load_all_data(
+bool __attribute__((weak)) llama_model_loader::load_all_data(
         struct ggml_context * ctx,
         llama_buf_map & bufs,
         llama_mlocks * lmlocks,

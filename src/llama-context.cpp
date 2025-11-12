@@ -234,16 +234,62 @@ llama_context::llama_context(
 
             if (backend_type == GGML_BACKEND_DEVICE_TYPE_CPU && !model.devices.empty()) {
                 // use the host buffer of the first device CPU for faster transfer of the intermediate state
-                auto * dev = model.devices[0];
-                auto * host_buft = ggml_backend_dev_host_buffer_type(dev);
-                if (host_buft) {
-                    buft = host_buft;
+                bool is_default_rpc=false;
+                const char * start_a;
+                const char * stop_a;
+                auto default_backend_name = ggml_backend_buft_name(buft);
+                if (strncmp(default_backend_name,"RPC",3)==0)
+                {
+                    is_default_rpc=true;
+                    start_a=strstr(default_backend_name,"[");
+                    stop_a=strstr(default_backend_name,"]");
                 }
+
+                //printf("AAAAAA\n");
+                for (auto * dev : model.devices) {
+                    auto backend_dev_name=ggml_backend_dev_name(dev);
+                    //printf("Checking RPC backend %s vs default buft %s\n", backend_dev_name, default_backend_name);
+                    if (is_default_rpc)
+                    {
+                        auto * host_buft = ggml_backend_dev_host_buffer_type(dev);
+                        if (host_buft)
+                        {
+                            auto backend_name = ggml_backend_buft_name(host_buft);   
+                            if (strncmp(backend_name,"RPC",3)==0)
+                            {
+                                const char * start_b=strstr(backend_name,"[");
+                                if ((strncmp(start_a, start_b, stop_a - start_a+1) == 0))
+                                {
+                                    buft = host_buft;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    else
+                    {
+                        if (strncmp(backend_dev_name,"RPC",3)!=0)
+                        {
+                            auto * host_buft = ggml_backend_dev_host_buffer_type(dev);
+                            if (host_buft) {
+                                buft = host_buft;
+                            }
+                            break;
+                        }
+                    }
+                    
+                }
+                //auto * dev = model.devices[0];
+                //auto * host_buft = ggml_backend_dev_host_buffer_type(dev);
+                //if (host_buft) {
+                //    buft = host_buft;
+                //}
             }
 
             backend_buft.push_back(buft);
             backend_ptrs.push_back(backend.get());
         }
+        //printf("BBBBBB\n");
 
         LLAMA_LOG_DEBUG("%s: backend_ptrs.size() = %zu\n", __func__, backend_ptrs.size());
 
@@ -280,6 +326,16 @@ llama_context::llama_context(
                     break;
                 }
             }
+        }
+
+        for (auto & backend : backends) {
+            LLAMA_LOG_INFO("%s: backend %s on device %s\n", __func__,
+                    ggml_backend_name(backend.get()),
+                    ggml_backend_dev_name(ggml_backend_get_device(backend.get())));
+        }
+        for (auto * buft : backend_buft) {
+            LLAMA_LOG_INFO("%s: buffer type %s\n", __func__,
+                    ggml_backend_buft_name(buft));
         }
 
         sched.reset(ggml_backend_sched_new(backend_ptrs.data(), backend_buft.data(), backend_ptrs.size(), max_nodes, pipeline_parallel, cparams.op_offload));
@@ -753,7 +809,7 @@ bool llama_context::apply_adapter_cvec(
     return cvec.apply(model, data, len, n_embd, il_start, il_end);
 }
 
-llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, llm_graph_type gtype, llama_memory_context_i * mctx, ggml_status & ret) {
+llm_graph_result * __attribute__((weak)) llama_context::process_ubatch(const llama_ubatch & ubatch, llm_graph_type gtype, llama_memory_context_i * mctx, ggml_status & ret) {
     if (mctx && !mctx->apply()) {
         LLAMA_LOG_ERROR("%s: failed to apply memory context\n", __func__);
         ret = GGML_STATUS_FAILED;
@@ -767,7 +823,7 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
     // in order to correctly reuse a graph, it's full topology has to be uniquely determined by these parameters
     const auto gparams = graph_params(res, ubatch, mctx, gtype);
 
-    if (!graph_reuse_disable && res->can_reuse(gparams)) {
+    if (false && !graph_reuse_disable && res->can_reuse(gparams)) {
         //LLAMA_LOG_DEBUG("%s: reusing previous graph\n", __func__);
 
         n_reused++;
@@ -979,7 +1035,7 @@ int llama_context::encode(const llama_batch & batch_inp) {
     return 0;
 }
 
-int llama_context::decode(const llama_batch & batch_inp) {
+int __attribute__((weak)) llama_context::decode(const llama_batch & batch_inp) {
     GGML_ASSERT((!batch_inp.token && batch_inp.embd) || (batch_inp.token && !batch_inp.embd)); // NOLINT
 
     if (!memory) {
@@ -1335,7 +1391,9 @@ uint32_t llama_context::output_reserve(int32_t n_outputs) {
         auto * output_dev = model.dev_output();
         auto * output_dev_host_buft = output_dev ? ggml_backend_dev_host_buffer_type(output_dev) : nullptr;
         if (output_dev_host_buft) {
-            buft = output_dev_host_buft;
+            if (strncmp(ggml_backend_buft_name(output_dev_host_buft), "RPC", 3) != 0) {
+                buft = output_dev_host_buft;
+            }
         }
         buf_output.reset(ggml_backend_buft_alloc_buffer(buft, new_size));
         if (buf_output == nullptr) {
