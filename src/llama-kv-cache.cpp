@@ -1520,6 +1520,7 @@ void llama_kv_cache::state_write(llama_io_write_i & io, llama_seq_id seq_id, lla
         io.write(&cell_count, sizeof(cell_count));
 
         // skip empty streams
+        //printf("state_write: N_stream: %d, cell_count: %d\n", s, cell_count);
         if (cell_count == 0) {
             continue;
         }
@@ -1529,7 +1530,7 @@ void llama_kv_cache::state_write(llama_io_write_i & io, llama_seq_id seq_id, lla
     }
 }
 
-void llama_kv_cache::state_read(llama_io_read_i & io, llama_seq_id seq_id, llama_state_seq_flags flags) {
+void __attribute__((weak)) llama_kv_cache::state_read(llama_io_read_i & io, llama_seq_id seq_id, llama_state_seq_flags flags) {
     GGML_UNUSED(flags);
 
     GGML_ASSERT(seq_id == -1 || (seq_id >= 0 && (size_t) seq_id < seq_to_stream.size()));
