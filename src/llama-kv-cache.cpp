@@ -1476,7 +1476,7 @@ bool llama_kv_cache::is_masked_swa(llama_pos p0, llama_pos p1) const {
     return llama_hparams::is_masked_swa(n_swa, swa_type, p0, p1);
 }
 
-void llama_kv_cache::state_write(llama_io_write_i & io, llama_seq_id seq_id, llama_state_seq_flags flags) const {
+void __attribute__((weak)) llama_kv_cache::state_write(llama_io_write_i & io, llama_seq_id seq_id, llama_state_seq_flags flags) const {
     GGML_UNUSED(flags);
 
     io.write(&n_stream, sizeof(n_stream));
