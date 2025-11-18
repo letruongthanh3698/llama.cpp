@@ -841,7 +841,7 @@ static ggml_backend_i ggml_backend_rpc_interface = {
     /* .graph_optimize          = */ NULL,
 };
 
-ggml_backend_buffer_type_t ggml_backend_rpc_buffer_type(const char * endpoint, uint32_t device) {
+ggml_backend_buffer_type_t __attribute__((weak)) ggml_backend_rpc_buffer_type(const char * endpoint, uint32_t device) {
     static std::mutex mutex;
     std::lock_guard<std::mutex> lock(mutex);
     std::string buft_name = "RPC" + std::to_string(device) + "[" + std::string(endpoint) + "]";
@@ -875,7 +875,7 @@ ggml_backend_buffer_type_t ggml_backend_rpc_buffer_type(const char * endpoint, u
     return buft;
 }
 
-ggml_backend_t ggml_backend_rpc_init(const char * endpoint, uint32_t device) {
+ggml_backend_t __attribute__((weak)) ggml_backend_rpc_init(const char * endpoint, uint32_t device) {
     std::string dev_name = "RPC" + std::to_string(device) + "[" + std::string(endpoint) + "]";
     ggml_backend_rpc_context * ctx = new ggml_backend_rpc_context {
         /* .endpoint = */ endpoint,
@@ -892,7 +892,7 @@ ggml_backend_t ggml_backend_rpc_init(const char * endpoint, uint32_t device) {
     return backend;
 }
 
-bool ggml_backend_is_rpc(ggml_backend_t backend) {
+bool __attribute__((weak)) ggml_backend_is_rpc(ggml_backend_t backend) {
     return backend != NULL && ggml_guid_matches(backend->guid, ggml_backend_rpc_guid());
 }
 
@@ -906,7 +906,7 @@ static void get_device_memory(const std::shared_ptr<socket_t> & sock, uint32_t d
     *total = response.total_mem;
 }
 
-void ggml_backend_rpc_get_device_memory(const char * endpoint, uint32_t device, size_t * free, size_t * total) {
+void __attribute__((weak)) ggml_backend_rpc_get_device_memory(const char * endpoint, uint32_t device, size_t * free, size_t * total) {
     auto sock = get_socket(endpoint);
     if (sock == nullptr) {
         *free = 0;
@@ -1721,7 +1721,7 @@ static void rpc_serve_client(const std::vector<ggml_backend_t> & backends, const
     }
 }
 
-void ggml_backend_rpc_start_server(const char * endpoint, const char * cache_dir,
+void __attribute__((weak)) ggml_backend_rpc_start_server(const char * endpoint, const char * cache_dir,
                                    size_t n_threads, size_t n_devices, ggml_backend_dev_t * devices) {
     if (n_devices == 0 || devices == nullptr) {
         fprintf(stderr, "Invalid arguments to ggml_backend_rpc_start_server\n");
@@ -1939,7 +1939,7 @@ static const struct ggml_backend_reg_i ggml_backend_rpc_reg_i = {
     /* .get_proc_address = */ ggml_backend_rpc_get_proc_address,
 };
 
-ggml_backend_reg_t ggml_backend_rpc_reg(void) {
+ggml_backend_reg_t __attribute__((weak)) ggml_backend_rpc_reg(void) {
     static struct ggml_backend_reg ggml_backend_rpc_reg = {
         /* .api_version = */ GGML_BACKEND_API_VERSION,
         /* .iface       = */ ggml_backend_rpc_reg_i,
@@ -1964,7 +1964,7 @@ static const ggml_backend_reg_i ggml_backend_rpc_reg_interface = {
     /* .get_proc_address  = */ ggml_backend_rpc_get_proc_address,
 };
 
-ggml_backend_reg_t ggml_backend_rpc_add_server(const char * endpoint) {
+ggml_backend_reg_t __attribute__((weak)) ggml_backend_rpc_add_server(const char * endpoint) {
     static std::unordered_map<std::string, ggml_backend_reg_t> reg_map;
     static std::mutex mutex;
     static uint32_t dev_id = 0;
@@ -2006,4 +2006,4 @@ ggml_backend_reg_t ggml_backend_rpc_add_server(const char * endpoint) {
 }
 
 
-GGML_BACKEND_DL_IMPL(ggml_backend_rpc_reg)
+//GGML_BACKEND_DL_IMPL(ggml_backend_rpc_reg)
