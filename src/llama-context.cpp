@@ -484,7 +484,6 @@ llama_context::~llama_context() {
 
 void llama_context::synchronize() {
     ggml_backend_sched_synchronize(sched.get());
-
     // FIXME: if multiple single tokens are evaluated without a synchronization,
     // the stats will be added to the prompt evaluation stats
     // this should only happen when using batch size 1 to evaluate a batch
@@ -823,7 +822,7 @@ llm_graph_result * __attribute__((weak)) llama_context::process_ubatch(const lla
     // in order to correctly reuse a graph, it's full topology has to be uniquely determined by these parameters
     const auto gparams = graph_params(res, ubatch, mctx, gtype);
 
-    if (false && !graph_reuse_disable && res->can_reuse(gparams)) {
+    if (!graph_reuse_disable && res->can_reuse(gparams)) {
         //LLAMA_LOG_DEBUG("%s: reusing previous graph\n", __func__);
 
         n_reused++;
