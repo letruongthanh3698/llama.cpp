@@ -1,8 +1,6 @@
-ARG UBUNTU_VERSION=25.10
+ARG UBUNTU_VERSION=26.04
 
 FROM ubuntu:$UBUNTU_VERSION AS build
-
-# Ref: https://vulkan.lunarg.com/doc/sdk/latest/linux/getting_started.html
 
 # Install build tools
 RUN apt update && apt install -y git build-essential cmake wget xz-utils
@@ -20,7 +18,7 @@ RUN cmake -B build -DGGML_NATIVE=OFF -DGGML_VULKAN=ON -DLLAMA_BUILD_TESTS=OFF -D
     cmake --build build --config Release -j$(nproc)
 
 RUN mkdir -p /app/lib && \
-    find build -name "*.so" -exec cp {} /app/lib \;
+    find build -name "*.so*" -exec cp -P {} /app/lib \;
 
 RUN mkdir -p /app/full \
     && cp build/bin/* /app/full \
@@ -52,6 +50,7 @@ WORKDIR /app
 
 RUN apt-get update \
     && apt-get install -y \
+    build-essential \
     git \
     python3 \
     python3-pip \
