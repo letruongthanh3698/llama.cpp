@@ -2530,31 +2530,31 @@ void llama_synchronize(llama_context * ctx) {
     ctx->synchronize();
 }
 
-float * llama_get_logits(llama_context * ctx) {
+float * __attribute__((weak)) llama_get_logits(llama_context * ctx) {
     ctx->synchronize();
 
     return ctx->get_logits();
 }
 
-float * llama_get_logits_ith(llama_context * ctx, int32_t i) {
+float * __attribute__((weak)) llama_get_logits_ith(llama_context * ctx, int32_t i) {
     ctx->synchronize();
 
     return ctx->get_logits_ith(i);
 }
 
-float * llama_get_embeddings(llama_context * ctx) {
+float * __attribute__((weak)) llama_get_embeddings(llama_context * ctx) {
     ctx->synchronize();
 
     return ctx->get_embeddings();
 }
 
-float * llama_get_embeddings_ith(llama_context * ctx, int32_t i) {
+float * __attribute__((weak)) llama_get_embeddings_ith(llama_context * ctx, int32_t i) {
     ctx->synchronize();
 
     return ctx->get_embeddings_ith(i);
 }
 
-float * llama_get_embeddings_seq(llama_context * ctx, llama_seq_id seq_id) {
+float * __attribute__((weak)) llama_get_embeddings_seq(llama_context * ctx, llama_seq_id seq_id) {
     ctx->synchronize();
 
     return ctx->get_embeddings_seq(seq_id);
