@@ -6050,7 +6050,9 @@ void kernel_flash_attn_ext_vec_impl(
             }
 
             // skip -INF blocks
-            if (simd_max(sm[tiisg]) == -INFINITY) {
+            // note: fully-masked / padding blocks carry -MAXHALF (not -INFINITY); compare against
+            //       the half floor so SWA/padding blocks are skipped instead of overflowing to NaN
+            if (simd_max(sm[tiisg]) <= -MAXHALF) {
                 continue;
             }
 
