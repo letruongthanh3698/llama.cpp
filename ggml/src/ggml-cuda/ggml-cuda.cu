@@ -2273,6 +2273,85 @@ static void ggml_cuda_mul_mat_id(ggml_backend_cuda_context & ctx, ggml_tensor * 
 
     const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
 
+    // ---- RW debug: catch bad MoE routing / NaN activations before the MMQ kernel reads OOB ----
+    // Enable with RW_DEBUG_MOE=1 (ids range + shape dump) or RW_DEBUG_MOE=2 (also scan src1 for NaN/Inf).
+    static const int rw_debug_moe = [] {
+        const char * e = getenv("RW_DEBUG_MOE");
+        return e ? atoi(e) : 0;
+    }();
+    if (rw_debug_moe) {
+        static int rw_call = 0;
+        const int call_id = rw_call++;
+        cudaStream_t dbg_stream = ctx.stream();
+
+        // During CUDA graph capture the stream cannot be synchronized and ids is not yet
+        // populated, so host-side validation is only meaningful on a real (non-captured) launch.
+        cudaStreamCaptureStatus cap_status = cudaStreamCaptureStatusNone;
+        cudaStreamIsCapturing(dbg_stream, &cap_status);
+        if (cap_status != cudaStreamCaptureStatusNone) {
+            fprintf(stderr, "[RW_DEBUG_MOE] call=%d node=%s capturing -> skip host validation\n", call_id, dst->name);
+            fflush(stderr);
+        } else {
+
+        const int64_t n_expert = ne02; // number of expert matrices in src0
+
+        // copy ids to host and validate every routed index against [0, n_expert)
+        std::vector<char> dbg_ids_host(ggml_nbytes(ids));
+        CUDA_CHECK(cudaMemcpyAsync(dbg_ids_host.data(), ids->data, ggml_nbytes(ids), cudaMemcpyDeviceToHost, dbg_stream));
+        CUDA_CHECK(cudaStreamSynchronize(dbg_stream));
+
+        int    bad_count = 0;
+        int32_t bad_val  = 0;
+        int64_t bad_i0 = -1, bad_i1 = -1;
+        int32_t id_min = INT32_MAX, id_max = INT32_MIN;
+        for (int64_t i1 = 0; i1 < ids->ne[1]; ++i1) {
+            for (int64_t i0 = 0; i0 < ids->ne[0]; ++i0) {
+                const int32_t id = *(const int32_t *)(dbg_ids_host.data() + i1*ids->nb[1] + i0*ids->nb[0]);
+                if (id < id_min) id_min = id;
+                if (id > id_max) id_max = id;
+                if (id < 0 || id >= n_expert) {
+                    if (bad_count == 0) { bad_val = id; bad_i0 = i0; bad_i1 = i1; }
+                    bad_count++;
+                }
+            }
+        }
+
+        const bool will_mmq = (src1->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32 &&
+                               ne2 != 1 && ggml_cuda_should_use_mmq(src0->type, cc, ne12));
+
+        // optional NaN/Inf scan of the activations that feed quantize_mmq_q8_1
+        int nan_count = 0, inf_count = 0;
+        if (rw_debug_moe >= 2 && src1->type == GGML_TYPE_F32) {
+            std::vector<float> dbg_src1(ggml_nelements(src1));
+            CUDA_CHECK(cudaMemcpyAsync(dbg_src1.data(), src1->data, ggml_nbytes(src1), cudaMemcpyDeviceToHost, dbg_stream));
+            CUDA_CHECK(cudaStreamSynchronize(dbg_stream));
+            for (float v : dbg_src1) {
+                if (v != v) nan_count++;                                   // NaN
+                else if (v > 3.4e38f || v < -3.4e38f) inf_count++;        // +/-Inf (beyond FLT_MAX)
+            }
+        }
+
+        if (bad_count || nan_count || inf_count) {
+            fprintf(stderr,
+                "[RW_DEBUG_MOE] call=%d node=%s ANOMALY: bad_ids=%d (first id=%d at [%lld,%lld]) nan=%d inf=%d | "
+                "n_expert=%lld n_expert_used=%lld ids[min=%d max=%d] n_tokens(ne12)=%lld ne2=%lld "
+                "src0(type=%s ne=%lld,%lld,%lld,%lld) src1(ne=%lld,%lld,%lld,%lld) dst(ne=%lld,%lld,%lld,%lld) path=%s\n",
+                call_id, dst->name, bad_count, bad_val, (long long)bad_i0, (long long)bad_i1, nan_count, inf_count,
+                (long long)n_expert, (long long)ids->ne[0], id_min, id_max, (long long)ne12, (long long)ne2,
+                ggml_type_name(src0->type), (long long)ne00, (long long)ne01, (long long)ne02, (long long)ne03,
+                (long long)ne10, (long long)ne11, (long long)ne12, (long long)ne13,
+                (long long)ne0, (long long)ne1, (long long)ne2, (long long)ne3,
+                will_mmq ? "MMQ" : "other");
+            fflush(stderr);
+        } else {
+            fprintf(stderr, "[RW_DEBUG_MOE] call=%d node=%s ok ids[%d..%d]/%lld n_tok=%lld path=%s\n",
+                call_id, dst->name, id_min, id_max, (long long)n_expert, (long long)ne12, will_mmq ? "MMQ" : "other");
+            fflush(stderr);
+        }
+        } // end !capturing
+    }
+    // ---- end RW debug ----
+
     if (src1->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32) {
         if (ne2 == 1) {
             if (ggml_is_quantized(src0->type)) {
@@ -2731,6 +2810,62 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
         GGML_LOG_ERROR("%s: %s failed\n", __func__, ggml_op_desc(dst));
         CUDA_CHECK(err);
     }
+
+    // ---- RW debug: scan each node's output for NaN/Inf to find the FIRST producer ----
+    // Enable with RW_DEBUG_NAN=1. Only meaningful with CUDA graphs disabled (no capture).
+    static const int rw_debug_nan = [] {
+        const char * e = getenv("RW_DEBUG_NAN");
+        return e ? atoi(e) : 0;
+    }();
+    if (rw_debug_nan && dst->data && dst->type == GGML_TYPE_F32) {
+        cudaStream_t s = ctx.stream();
+        cudaStreamCaptureStatus cap = cudaStreamCaptureStatusNone;
+        cudaStreamIsCapturing(s, &cap);
+        if (cap == cudaStreamCaptureStatusNone) {
+            const size_t nbytes = ggml_nbytes(dst);
+            const size_t n = nbytes / sizeof(float);
+            std::vector<float> host(n);
+            CUDA_CHECK(cudaMemcpyAsync(host.data(), dst->data, nbytes, cudaMemcpyDeviceToHost, s));
+            CUDA_CHECK(cudaStreamSynchronize(s));
+            int nan_count = 0, inf_count = 0;
+            for (size_t i = 0; i < n; ++i) {
+                const float v = host[i];
+                if (v != v) nan_count++;
+                else if (v > 3.4e38f || v < -3.4e38f) inf_count++;
+            }
+            if (nan_count || inf_count) {
+                // check whether the NaN came IN via the sources or was GENERATED by this op
+                auto scan_src = [&](const ggml_tensor * t, const char * tag) {
+                    if (!t || !t->data) { fprintf(stderr, "  %s=(null)", tag); return; }
+                    if (t->type != GGML_TYPE_F32) { fprintf(stderr, "  %s=%s(type=%s,not-scanned)", tag, t->name, ggml_type_name(t->type)); return; }
+                    const size_t sb = ggml_nbytes(t);
+                    const size_t sn = sb / sizeof(float);
+                    std::vector<float> sh(sn);
+                    if (cudaMemcpyAsync(sh.data(), t->data, sb, cudaMemcpyDeviceToHost, s) != cudaSuccess ||
+                        cudaStreamSynchronize(s) != cudaSuccess) {
+                        fprintf(stderr, "  %s=%s(read-failed)", tag, t->name); (void)cudaGetLastError(); return;
+                    }
+                    int sn_nan = 0, sn_inf = 0;
+                    for (size_t i = 0; i < sn; ++i) { const float v = sh[i]; if (v != v) sn_nan++; else if (v > 3.4e38f || v < -3.4e38f) sn_inf++; }
+                    fprintf(stderr, "  %s=%s NaN=%d Inf=%d/%zu", tag, t->name, sn_nan, sn_inf, sn);
+                };
+                fprintf(stderr, "[RW_DEBUG_NAN] node=%s op=%s NaN=%d Inf=%d / %zu  ne=%lld,%lld,%lld,%lld\n",
+                    dst->name, ggml_op_desc(dst), nan_count, inf_count, n,
+                    (long long)dst->ne[0], (long long)dst->ne[1], (long long)dst->ne[2], (long long)dst->ne[3]);
+                fprintf(stderr, "[RW_DEBUG_NAN]   sources:");
+                scan_src(dst->src[0], "src0");
+                scan_src(dst->src[1], "src1");
+                fprintf(stderr, "\n");
+                fflush(stderr);
+                if (rw_debug_nan >= 2) {
+                    fprintf(stderr, "[RW_DEBUG_NAN] stopping at first NaN node (RW_DEBUG_NAN>=2)\n");
+                    fflush(stderr);
+                    std::_Exit(7);
+                }
+            }
+        }
+    }
+    // ---- end RW debug ----
 
     return true;
 }
@@ -3552,14 +3687,45 @@ static void evaluate_and_capture_cuda_graph(ggml_backend_cuda_context * cuda_ctx
                         continue;
                     }
 
+                    // RW debug: scan a fused-RMS-norm's input (before) and output (after) for NaN
+                    static const int rw_dbg_norm = [] { const char * e = getenv("RW_DEBUG_NAN"); return e ? atoi(e) : 0; }();
+                    auto rw_scan = [&](const char * tag, const char * phase, const ggml_tensor * t) -> int {
+                        if (!rw_dbg_norm || !t || !t->data || t->type != GGML_TYPE_F32) return 0;
+                        cudaStream_t s = cuda_ctx->stream();
+                        cudaStreamCaptureStatus cap = cudaStreamCaptureStatusNone;
+                        cudaStreamIsCapturing(s, &cap);
+                        if (cap != cudaStreamCaptureStatusNone) return 0;
+                        const size_t nb = ggml_nbytes(t); const size_t nn = nb/sizeof(float);
+                        std::vector<float> h(nn);
+                        if (cudaMemcpyAsync(h.data(), t->data, nb, cudaMemcpyDeviceToHost, s) != cudaSuccess ||
+                            cudaStreamSynchronize(s) != cudaSuccess) { (void)cudaGetLastError(); return 0; }
+                        int c = 0; for (float v : h) if (v != v) c++;
+                        if (c) { fprintf(stderr, "[RW_DEBUG_NORM] %s %s=%s NaN=%d/%zu\n", phase, tag, t->name, c, nn); fflush(stderr); }
+                        return c;
+                    };
+
                     if (ggml_cuda_can_fuse(cgraph, i, { GGML_OP_RMS_NORM, GGML_OP_MUL, GGML_OP_ADD}, {})) {
+                        ggml_tensor * out = cgraph->nodes[i+2];
+                        int in_nan = rw_scan("in", "BEFORE", node->src[0]);
                         ggml_cuda_op_rms_norm_fused_add(*cuda_ctx, node, cgraph->nodes[i+1], cgraph->nodes[i+2]);
+                        int out_nan = rw_scan("out", "AFTER ", out);
+                        if (rw_dbg_norm >= 2 && out_nan && !in_nan) {
+                            fprintf(stderr, "[RW_DEBUG_NORM] fused_add GENERATED NaN from clean input at %s -> stopping\n", out->name);
+                            fflush(stderr); std::_Exit(8);
+                        }
                         i += 2;
                         continue;
                     }
 
                     if (ggml_cuda_can_fuse(cgraph, i, { GGML_OP_RMS_NORM, GGML_OP_MUL}, {})) {
+                        ggml_tensor * out = cgraph->nodes[i+1];
+                        int in_nan = rw_scan("in", "BEFORE", node->src[0]);
                         ggml_cuda_op_rms_norm_fused(*cuda_ctx, node, cgraph->nodes[i+1]);
+                        int out_nan = rw_scan("out", "AFTER ", out);
+                        if (rw_dbg_norm >= 2 && out_nan && !in_nan) {
+                            fprintf(stderr, "[RW_DEBUG_NORM] fused GENERATED NaN from clean input at %s -> stopping\n", out->name);
+                            fflush(stderr); std::_Exit(8);
+                        }
                         i++;
                         continue;
                     }
