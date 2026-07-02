@@ -647,6 +647,7 @@ extern "C" {
         GGML_TENSOR_FLAG_PARAM   =  4, // ...contains trainable parameters
         GGML_TENSOR_FLAG_LOSS    =  8, // ...defines loss for numerical optimization (multiple loss tensors add up)
         GGML_TENSOR_FLAG_COMPUTE = 16, // ...must be computed
+        GGML_TENSOR_FLAG_SKIP_ALLOC = 32, // P2P: ...belongs to an out-of-range layer; skip loading/allocating it
     };
 
     enum ggml_tri_type {

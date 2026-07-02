@@ -315,6 +315,12 @@ extern "C" {
         // override key-value pairs of the model meta data
         const struct llama_model_kv_override * kv_overrides;
 
+        // P2P pipeline-parallel layer partition (this device holds only a slice of the model).
+        // -1 = defaults (start=0, end=n_layer_all, all layers loaded).
+        int32_t start_layer;    // first transformer layer this device loads/runs (inclusive)
+        int32_t end_layer;      // one-past-last transformer layer this device loads/runs (exclusive)
+        int32_t n_used_layers;  // number of layers to load (<=0 means all); resizes the model
+
         // Keep the booleans together to avoid misalignment during copy-by-value.
         bool vocab_only;      // only load the vocabulary, no weights
         bool use_mmap;        // use mmap if possible

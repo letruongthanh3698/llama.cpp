@@ -1056,6 +1056,27 @@ void llama_model_base::load_hparams(llama_model_loader & ml) {
     ml.get_key(LLM_KV_ATTENTION_CAUSAL,        hparams.causal_attn,     false);
     ml.get_key(LLM_KV_POOLING_TYPE,            hparams.pooling_type,    false);
     ml.get_key(LLM_KV_BLOCK_COUNT,             hparams.n_layer_all);
+
+    // P2P: finalize the effective layer slice now that n_layer_all is known.
+    // Requested via llama_model_params (stashed on hparams before load_hparams).
+    // Semantics: load layers [start, end); default = whole model.
+    {
+        const uint32_t n_all = hparams.n_layer_all;
+        uint32_t s = hparams.p2p_start_layer_req >= 0 ? (uint32_t) hparams.p2p_start_layer_req : 0u;
+        uint32_t e = hparams.p2p_end_layer_req   >= 0 ? (uint32_t) hparams.p2p_end_layer_req   : n_all;
+        if (hparams.p2p_n_used_req > 0) {
+            e = s + (uint32_t) hparams.p2p_n_used_req;
+        }
+        e = std::min(e, n_all);
+        s = std::min(s, e);
+        hparams.p2p_layer_start = s;
+        hparams.p2p_layer_end   = e;
+        if (s != 0 || e != n_all) {
+            LLAMA_LOG_INFO("%s: P2P layer partition: loading layers [%u, %u) of %u\n",
+                    __func__, s, e, n_all);
+        }
+    }
+
     ml.get_key(LLM_KV_EXPERT_COUNT,            hparams.n_expert,        false);
     ml.get_key(LLM_KV_EXPERT_USED_COUNT,       hparams.n_expert_used,   false);
     ml.get_key(LLM_KV_EXPERT_GROUP_COUNT,      hparams.n_expert_groups, false);
@@ -2291,6 +2312,9 @@ llama_model_params llama_model_default_params() {
         /*.progress_callback           =*/ nullptr,
         /*.progress_callback_user_data =*/ nullptr,
         /*.kv_overrides                =*/ nullptr,
+        /*.start_layer                 =*/ -1,
+        /*.end_layer                   =*/ -1,
+        /*.n_used_layers               =*/ -1,
         /*.vocab_only                  =*/ false,
         /*.use_mmap                    =*/ true,
         /*.use_direct_io               =*/ false,

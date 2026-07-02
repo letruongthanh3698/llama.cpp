@@ -52,6 +52,22 @@ struct llama_hparams {
     uint32_t n_embd;
     uint32_t n_layer_all;
     uint32_t n_layer_nextn = 0;
+
+    // P2P pipeline-parallel layer partition (this device holds only a slice).
+    // *_req are copied from llama_model_params BEFORE load_hparams(); the effective
+    // [p2p_layer_start, p2p_layer_end) slice is finalized in load_hparams() once
+    // n_layer_all is known. Default (all -1 / 0) = whole model.
+    int32_t  p2p_start_layer_req = -1;  // requested inclusive start (params.start_layer)
+    int32_t  p2p_end_layer_req   = -1;  // requested exclusive end   (params.end_layer)
+    int32_t  p2p_n_used_req      = -1;  // requested layer count      (params.n_used_layers)
+    uint32_t p2p_layer_start     = 0;           // effective inclusive start
+    uint32_t p2p_layer_end       = 0;           // effective exclusive end (== n_layer_all when no partition)
+
+    // true if transformer layer `il` (global index) is loaded on this device
+    bool p2p_layer_loaded(uint32_t il) const {
+        return p2p_layer_end == 0 /*not finalized*/ || (il >= p2p_layer_start && il < p2p_layer_end);
+    }
+
     uint32_t n_expert = 0;
     uint32_t n_expert_used = 0;
     uint32_t n_rel_attn_bkts = 0;

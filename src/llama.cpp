@@ -305,6 +305,12 @@ static std::pair<int, llama_model *> llama_model_load(struct gguf_context * meta
         model->hparams.vocab_only = params.vocab_only;
         model->hparams.no_alloc   = params.no_alloc;
 
+        // P2P: stash the requested layer partition so load_hparams() can finalize
+        // the effective [start, end) slice once n_layer_all is known.
+        model->hparams.p2p_start_layer_req = params.start_layer;
+        model->hparams.p2p_end_layer_req   = params.end_layer;
+        model->hparams.p2p_n_used_req      = params.n_used_layers;
+
         try {
             model->load_hparams(ml);
         } catch(const std::exception & e) {
