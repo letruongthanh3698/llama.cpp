@@ -71,10 +71,19 @@ enum rpc_cmd {
     RPC_CMD_HELLO,
     RPC_CMD_DEVICE_COUNT,
     RPC_CMD_GRAPH_RECOMPUTE,
+    // --- P2P ring commands (Phase 7). Kept BEFORE RPC_CMD_COUNT so the serve loop's
+    //     `cmd >= RPC_CMD_COUNT` guard still admits them; dispatched to a registered handler. ---
+    RPC_CMD_P2P_BASE,
+    RPC_CMD_SET_HIDDEN_STATE = RPC_CMD_P2P_BASE,  // forward pre-norm hidden state to successor
+    RPC_CMD_RETURN_TOKEN,                          // tail -> head: sampled token id
     RPC_CMD_COUNT,
 };
 
 static_assert(RPC_CMD_HELLO == 14, "RPC_CMD_HELLO must be always 14");
+static_assert((int) RPC_CMD_SET_HIDDEN_STATE == (int) GGML_RPC_P2P_CMD_SET_HIDDEN_STATE,
+              "P2P command id must match the public ggml_rpc_p2p_cmd enum in ggml-rpc.h");
+static_assert((int) RPC_CMD_RETURN_TOKEN == (int) GGML_RPC_P2P_CMD_RETURN_TOKEN,
+              "P2P command id must match the public ggml_rpc_p2p_cmd enum in ggml-rpc.h");
 
 // Try RPC_CMD_SET_TENSOR_HASH first when data size is larger than this threshold
 const size_t HASH_THRESHOLD = 10 * 1024 * 1024;
@@ -1425,6 +1434,100 @@ rpc_server::~rpc_server() {
     }
 }
 
+// -------------------------------------------------------------------------------------------------
+// P2P ring transport (Phase 7): app-agnostic custom-command layer. See ggml-rpc.h for the contract.
+static ggml_rpc_p2p_handler_t g_p2p_handler = nullptr;
+static void *                 g_p2p_user    = nullptr;
+
+void ggml_rpc_register_p2p_handler(ggml_rpc_p2p_handler_t fn, void * user) {
+    g_p2p_handler = fn;
+    g_p2p_user    = user;
+}
+
+bool ggml_rpc_p2p_send(const char * endpoint, int32_t cmd, int32_t client_id,
+                       const uint8_t * in, size_t in_len, uint8_t ** out, size_t * out_len) {
+    if (out)     { *out = nullptr; }
+    if (out_len) { *out_len = 0; }
+    // Persistent per-successor socket: the ring sends thousands of messages to the SAME endpoint, so
+    // hold a strong ref (get_socket's cache is only weak -> would reconnect + re-HELLO every message).
+    // On any I/O failure we drop the entry so the next call reconnects. Guarded (single sender today,
+    // but keep it safe). The server already loops many commands per connection (rpc_serve_client).
+    static std::mutex p2p_sock_mtx;
+    static std::unordered_map<std::string, socket_ptr> p2p_sockets;
+    const std::string ep(endpoint);
+    socket_ptr sock;
+    {
+        std::lock_guard<std::mutex> lock(p2p_sock_mtx);
+        auto it = p2p_sockets.find(ep);
+        if (it != p2p_sockets.end()) {
+            sock = it->second;
+        } else {
+            sock = get_socket(endpoint);              // connect + HELLO once, then keep it alive
+            if (sock == nullptr) {
+                return false;
+            }
+            p2p_sockets[ep] = sock;
+        }
+    }
+    auto drop_socket = [&]() {
+        std::lock_guard<std::mutex> lock(p2p_sock_mtx);
+        auto it = p2p_sockets.find(ep);
+        if (it != p2p_sockets.end() && it->second == sock) {
+            p2p_sockets.erase(it);                    // dead connection; next send reconnects
+        }
+    };
+    // wire payload = [client_id(4)][in bytes]
+    std::vector<uint8_t> buf(sizeof(int32_t) + in_len);
+    memcpy(buf.data(), &client_id, sizeof(int32_t));
+    if (in_len > 0 && in != nullptr) {
+        memcpy(buf.data() + sizeof(int32_t), in, in_len);
+    }
+    if (!send_rpc_cmd(sock, (enum rpc_cmd) cmd, buf.data(), buf.size())) {
+        drop_socket();
+        return false;
+    }
+    std::vector<uint8_t> rsp;
+    if (!recv_msg(sock, rsp)) {
+        drop_socket();
+        return false;
+    }
+    if (out && out_len && !rsp.empty()) {
+        *out = (uint8_t *) malloc(rsp.size());
+        if (*out == nullptr) {
+            return false;
+        }
+        memcpy(*out, rsp.data(), rsp.size());
+        *out_len = rsp.size();
+    }
+    return true;
+}
+
+// Handle one P2P command on the server: strip client_id, invoke the registered handler, reply.
+static bool rpc_serve_p2p_cmd(socket_ptr sock, uint8_t cmd) {
+    std::vector<uint8_t> input;
+    if (!recv_msg(sock, input)) {
+        return false;
+    }
+    int32_t         client_id   = 0;
+    const uint8_t * payload      = nullptr;
+    size_t          payload_len  = 0;
+    if (input.size() >= sizeof(int32_t)) {
+        memcpy(&client_id, input.data(), sizeof(int32_t));
+        payload     = input.data() + sizeof(int32_t);
+        payload_len = input.size() - sizeof(int32_t);
+    }
+    uint8_t * out     = nullptr;
+    size_t    out_len = 0;
+    if (g_p2p_handler != nullptr) {
+        g_p2p_handler((int32_t) cmd, client_id, payload, payload_len, &out, &out_len, g_p2p_user);
+    } else {
+        GGML_LOG_ERROR("P2P command %d received but no handler registered\n", (int) cmd);
+    }
+    bool ok = send_msg(sock, out_len > 0 ? (const void *) out : (const void *) "", out_len);
+    free(out);
+    return ok;
+}
+
 static void rpc_serve_client(const std::vector<ggml_backend_t> & backends, const char * cache_dir,
                              socket_ptr sock) {
     rpc_server server(backends, cache_dir);
@@ -1472,6 +1575,13 @@ static void rpc_serve_client(const std::vector<ggml_backend_t> & backends, const
             // fail fast if the command is invalid
             GGML_LOG_ERROR("Unknown command: %d\n", cmd);
             break;
+        }
+        if (cmd >= RPC_CMD_P2P_BASE) {
+            // P2P ring command: route to the app-registered handler (app-agnostic path).
+            if (!rpc_serve_p2p_cmd(sock, cmd)) {
+                return;
+            }
+            continue;
         }
         switch (cmd) {
             case RPC_CMD_HELLO: {

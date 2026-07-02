@@ -569,6 +569,10 @@ extern "C" {
     LLAMA_API int32_t llama_model_n_embd_inp   (const struct llama_model * model);
     LLAMA_API int32_t llama_model_n_embd_out   (const struct llama_model * model);
     LLAMA_API int32_t llama_model_n_layer      (const struct llama_model * model);
+    // P2P ring: role of this device's loaded slice (from start/end layer vs the full model).
+    // A single-device full model returns true for both. Used to branch head/mid/tail behaviour.
+    LLAMA_API bool    llama_model_p2p_is_head  (const struct llama_model * model);
+    LLAMA_API bool    llama_model_p2p_is_tail  (const struct llama_model * model);
     LLAMA_API int32_t llama_model_n_layer_nextn(const struct llama_model * model);
     LLAMA_API int32_t llama_model_n_head       (const struct llama_model * model);
     LLAMA_API int32_t llama_model_n_head_kv    (const struct llama_model * model);

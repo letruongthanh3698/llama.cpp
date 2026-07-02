@@ -64,6 +64,12 @@ struct llama_hparams {
     uint32_t p2p_layer_end       = 0;           // effective exclusive end (GLOBAL; == full count when no partition)
     uint32_t p2p_n_layer_full    = 0;           // original n_layer_all before the slice resize (0 = no partition)
 
+    // Ring role, derived in load_hparams() when the true full layer count is known.
+    // A single-device full model is BOTH head and tail. Head embeds tokens; tail runs the final
+    // norm + lm_head (→ logits). A mid device exports the pre-norm hidden state and skips both.
+    bool p2p_is_head = true;   // slice starts at layer 0
+    bool p2p_is_tail = true;   // slice ends at the last layer
+
     // Is a partial slice active? (i.e. n_layer_all was resized down to the slice)
     bool p2p_partitioned() const { return p2p_n_layer_full != 0; }
 

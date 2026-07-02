@@ -820,6 +820,11 @@ enum llama_pooling_type llama_context::pooling_type() const {
 }
 
 float * llama_context::get_logits() {
+    // P2P: restored (was removed in Phase 2.1 for the server's async cross-device extraction).
+    // The decentralized ring doesn't use that, and default/stock API consumers (llama-cli/server,
+    // external bindings) rely on the getter blocking until compute is done. The ring's own explicit
+    // llama_synchronize in loop_main makes this a cheap no-op.
+    synchronize();
     output_reorder();
 
     return logits.data;
@@ -855,6 +860,7 @@ int64_t llama_context::output_resolve_row(int32_t i) const {
 }
 
 float * llama_context::get_logits_ith(int32_t i) {
+    synchronize();   // P2P: restored (see get_logits). Ring re-syncs cheaply; default apps need it.
     output_reorder();
 
     try {
@@ -875,6 +881,7 @@ float * llama_context::get_logits_ith(int32_t i) {
 }
 
 float * llama_context::get_embeddings() {
+    synchronize();   // P2P: restored (see get_logits).
     output_reorder();
 
     return embd.data;
@@ -885,6 +892,7 @@ llama_token * llama_context::get_sampled_tokens()  const{
 }
 
 float * llama_context::get_embeddings_ith(int32_t i) {
+    synchronize();   // P2P: restored (see get_logits).
     output_reorder();
 
     try {
@@ -906,6 +914,7 @@ float * llama_context::get_embeddings_ith(int32_t i) {
 }
 
 float * llama_context::get_embeddings_seq(llama_seq_id seq_id) {
+    synchronize();   // P2P: restored (see get_logits).
     auto it = embd_seq.find(seq_id);
     if (it == embd_seq.end()) {
         return nullptr;

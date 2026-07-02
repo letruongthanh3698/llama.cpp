@@ -76,7 +76,10 @@ llama_model_openai_moe::graph::graph(const llama_model & model, const llm_graph_
 
     auto * inp_attn = build_attn_inp_kv_iswa();
 
-    ggml_tensor * inp_out_ids = build_inp_out_ids();
+    // TAIL only: out_ids gathers the output rows before norm+lm_head. A mid/head ring device
+    // exports the full-width hidden state and never gathers, so it must NOT create this input
+    // (an unused input is left unallocated and would fail set_input's buffer assert).
+    ggml_tensor * inp_out_ids = hparams.p2p_is_tail ? build_inp_out_ids() : nullptr;
 
     // P2P: n_layer is this device's SLICE count (hparams was resized in load_hparams), and
     // model.layers is stored compactly, so the stock [0, n_layer) loop already computes exactly
@@ -124,8 +127,10 @@ llama_model_openai_moe::graph::graph(const llama_model & model, const llm_graph_
 
             cb(cur, "attn_out", il);
         }
-        if (il == n_layer - 1) {
-            // skip computing output for unused tokens
+        if (il == n_layer - 1 && hparams.p2p_is_tail) {
+            // skip computing output for unused tokens — TAIL ONLY. A mid/head ring device must
+            // forward the FULL-width hidden state (the next device's attention needs every
+            // position), so the out_ids reduction is applied only where logits are produced.
             cur   = ggml_get_rows(ctx0,   cur, inp_out_ids);
             inpSA = ggml_get_rows(ctx0, inpSA, inp_out_ids);
         }
@@ -160,7 +165,18 @@ llama_model_openai_moe::graph::graph(const llama_model & model, const llm_graph_
         // input for next layer
         inpL = cur;
     }
-    cur = inpL;
+    cur = inpL;   // pre-final-norm residual (the ring boundary hidden state)
+
+    if (!hparams.p2p_is_tail) {
+        // MID / HEAD ring device: export the PRE-norm hidden state and stop. The successor device
+        // consumes this as its input (via ubatch.embd). We deliberately skip output_norm + lm_head
+        // (only the tail produces logits). Stored in t_h_nextn (same slot MTP/EAGLE use), which the
+        // context copies out to the readable embd_nextn buffer when cparams.embeddings_nextn is set.
+        cb(cur, "result_h_nextn", -1);
+        res->t_h_nextn = cur;
+        ggml_build_forward_expand(gf, cur);
+        return;
+    }
 
     cur = build_norm(cur,
             model.output_norm, NULL,
