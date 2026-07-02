@@ -1524,6 +1524,11 @@ bool llama_model_loader::load_all_data(
     }
 
     for (struct ggml_tensor * cur = ggml_get_first_tensor(ctx); cur != NULL; cur = ggml_get_next_tensor(ctx, cur)) {
+        // P2P: out-of-range layer tensors (flagged in load_arch_tensors) are not allocated,
+        // so there is no buffer to load their data into — skip them.
+        if (cur->flags & GGML_TENSOR_FLAG_SKIP_ALLOC) {
+            continue;
+        }
         const auto * weight = get_weight(ggml_get_name(cur));
         if (weight == nullptr) {
             // this can happen with split experts models

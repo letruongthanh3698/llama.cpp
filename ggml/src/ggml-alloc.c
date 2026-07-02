@@ -1141,6 +1141,10 @@ static bool alloc_tensor_range(struct ggml_context * ctx,
     struct ggml_tallocr tallocr = ggml_tallocr_new(buffer);
 
     for (struct ggml_tensor * t = first; t != last; t = ggml_get_next_tensor(ctx, t)) {
+        // P2P: skip out-of-range layer tensors flagged for no allocation.
+        if (t->flags & GGML_TENSOR_FLAG_SKIP_ALLOC) {
+            continue;
+        }
         enum ggml_status status = GGML_STATUS_SUCCESS;
         if (t->data == NULL) {
             if (t->view_src == NULL) {
@@ -1178,6 +1182,10 @@ static ggml_backend_buffer_t ggml_backend_alloc_ctx_tensors_from_buft_impl(
     size_t cur_buf_size = 0;
     struct ggml_tensor * first = ggml_get_first_tensor(ctx);
     for (struct ggml_tensor * t = first; t != NULL; t = ggml_get_next_tensor(ctx, t)) {
+        // P2P: out-of-range layer tensors are not allocated (contribute 0 bytes).
+        if (t->flags & GGML_TENSOR_FLAG_SKIP_ALLOC) {
+            continue;
+        }
         size_t this_size = 0;
         if (t->data == NULL && t->view_src == NULL) {
             this_size = GGML_PAD(ggml_backend_buft_get_alloc_size(buft, t), alignment);
