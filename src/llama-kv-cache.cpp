@@ -182,6 +182,14 @@ llama_kv_cache::llama_kv_cache(
             continue;
         }
 
+        // P2P: this device only computes its layer slice, so it only holds KV for those layers.
+        // Out-of-range layers are skipped here (their weights are also skipped, see openai-moe).
+        // map_layer_ids compacts the in-range layers, matching the partitioned graph.
+        if (!hparams.p2p_layer_loaded(il)) {
+            LLAMA_LOG_DEBUG("%s: layer %3d: outside P2P slice, no KV\n", __func__, il);
+            continue;
+        }
+
         if (filter && !filter(il)) {
             LLAMA_LOG_DEBUG("%s: layer %3d: filtered\n", __func__, il);
             continue;
