@@ -3661,14 +3661,19 @@ void llama_synchronize(llama_context * ctx) {
     ctx->synchronize();
 }
 
+// P2P MIGRATION (Phase 2.1, was RWsrc/RWllama-context.cpp): the blocking
+// ctx->synchronize() is removed from the logits/embeddings getters so the P2P
+// scheduler can extract results asynchronously across devices (it does its own
+// synchronization). New-upstream bodies are otherwise preserved (note the
+// get_sampled_logits_ith fallback in _ith, which the old RW file predated).
 float * llama_get_logits(llama_context * ctx) {
-    ctx->synchronize();
+    //ctx->synchronize();  // P2P: no sync
 
     return ctx->get_logits();
 }
 
 float * llama_get_logits_ith(llama_context * ctx, int32_t i) {
-    ctx->synchronize();
+    //ctx->synchronize();  // P2P: no sync
 
     float * res = nullptr;
 
@@ -3682,19 +3687,19 @@ float * llama_get_logits_ith(llama_context * ctx, int32_t i) {
 }
 
 float * llama_get_embeddings(llama_context * ctx) {
-    ctx->synchronize();
+    //ctx->synchronize();  // P2P: no sync
 
     return ctx->get_embeddings();
 }
 
 float * llama_get_embeddings_ith(llama_context * ctx, int32_t i) {
-    ctx->synchronize();
+    //ctx->synchronize();  // P2P: no sync
 
     return ctx->get_embeddings_ith(i);
 }
 
 float * llama_get_embeddings_seq(llama_context * ctx, llama_seq_id seq_id) {
-    ctx->synchronize();
+    //ctx->synchronize();  // P2P: no sync
 
     return ctx->get_embeddings_seq(seq_id);
 }
