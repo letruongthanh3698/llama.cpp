@@ -1217,6 +1217,24 @@ void llama_model_base::load_hparams(llama_model_loader & ml) {
     // per-arch hparams
     load_arch_hparams(ml);
 
+    // P2P: NOW resize the model down to this device's layer slice, AFTER arch type detection and
+    // the per-layer array reads (which need the full layer count). This makes n_layer() == slice,
+    // so layers[], the KV cache, the graph, and graph inputs are all consistent. Weights for the
+    // slice are created with compact indices [0, n_slice) but GLOBAL GGUF names (p2p_global_il).
+    // NOTE: for start>0, per-layer hparams arrays (n_head_arr, rope, is_swa) are NOT offset yet —
+    // correct for uniform-layer models (e.g. gpt-oss) and for start==0; refine for non-uniform.
+    {
+        const uint32_t s = hparams.p2p_layer_start;
+        const uint32_t e = hparams.p2p_layer_end;
+        const uint32_t n_slice = (e > s) ? (e - s) : 0;
+        if (n_slice > 0 && n_slice < hparams.n_layer()) {
+            hparams.p2p_n_layer_full = hparams.n_layer_all;                 // remember the full count
+            hparams.n_layer_all      = n_slice + hparams.n_layer_nextn;     // => n_layer() == n_slice
+            LLAMA_LOG_INFO("%s: P2P partition: this device holds layers [%u, %u) of %u (n_layer now %u)\n",
+                    __func__, s, e, hparams.p2p_n_layer_full, hparams.n_layer());
+        }
+    }
+
     pimpl->n_bytes = ml.n_bytes;
 
     pimpl->desc_str = arch_name() + " " + type_name() + " " + ml.ftype_name();
@@ -1495,7 +1513,9 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
             }
         }
     }
-    ml.done_getting_tensors();
+    // P2P: when this device holds only a layer slice, it intentionally creates fewer tensors than
+    // the file contains — allow the partial-load path instead of erroring on the tensor count.
+    ml.done_getting_tensors(/*partial=*/ hparams.p2p_partitioned());
 
     // Tied NVFP4 output is valid when no separate LM-head scale tensors are present.
     // If sidecar scales exist, the output weight must be an actual output tensor.

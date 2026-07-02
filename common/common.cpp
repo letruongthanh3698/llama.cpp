@@ -1535,6 +1535,9 @@ struct llama_model_params common_model_params_to_llama(common_params & params) {
     }
 
     mparams.n_gpu_layers    = params.n_gpu_layers;
+    mparams.start_layer     = params.start_layer;     // P2P layer partition
+    mparams.end_layer       = params.end_layer;
+    mparams.n_used_layers   = params.n_used_layers;
     mparams.main_gpu        = params.main_gpu;
     mparams.split_mode      = params.split_mode;
     mparams.tensor_split    = params.tensor_split;

@@ -60,13 +60,15 @@ struct llama_hparams {
     int32_t  p2p_start_layer_req = -1;  // requested inclusive start (params.start_layer)
     int32_t  p2p_end_layer_req   = -1;  // requested exclusive end   (params.end_layer)
     int32_t  p2p_n_used_req      = -1;  // requested layer count      (params.n_used_layers)
-    uint32_t p2p_layer_start     = 0;           // effective inclusive start
-    uint32_t p2p_layer_end       = 0;           // effective exclusive end (== n_layer_all when no partition)
+    uint32_t p2p_layer_start     = 0;           // effective inclusive start (GLOBAL layer index)
+    uint32_t p2p_layer_end       = 0;           // effective exclusive end (GLOBAL; == full count when no partition)
+    uint32_t p2p_n_layer_full    = 0;           // original n_layer_all before the slice resize (0 = no partition)
 
-    // true if transformer layer `il` (global index) is loaded on this device
-    bool p2p_layer_loaded(uint32_t il) const {
-        return p2p_layer_end == 0 /*not finalized*/ || (il >= p2p_layer_start && il < p2p_layer_end);
-    }
+    // Is a partial slice active? (i.e. n_layer_all was resized down to the slice)
+    bool p2p_partitioned() const { return p2p_n_layer_full != 0; }
+
+    // Map a compact (post-resize) layer index [0, n_slice) to its GLOBAL layer index (for GGUF names).
+    uint32_t p2p_global_il(uint32_t il_compact) const { return p2p_layer_start + il_compact; }
 
     uint32_t n_expert = 0;
     uint32_t n_expert_used = 0;

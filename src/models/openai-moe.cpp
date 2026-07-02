@@ -32,42 +32,32 @@ void llama_model_openai_moe::load_arch_tensors(llama_model_loader &) {
     output_norm = create_tensor(tn(LLM_TENSOR_OUTPUT_NORM, "weight"), {n_embd}, 0);
     output      = create_tensor(tn(LLM_TENSOR_OUTPUT,      "weight"), {n_embd, n_vocab}, 0);
 
+    // P2P: n_layer is this device's SLICE count (hparams was resized in load_hparams). We store
+    // layers compactly at [0, n_layer) but name the GGUF tensors with the GLOBAL layer index so a
+    // device holding layers [start, end) reads the right weights from the file.
     for (int i = 0; i < n_layer; ++i) {
         auto & layer = layers[i];
+        const int g = (int) hparams.p2p_global_il((uint32_t) i);   // GLOBAL GGUF layer index
 
-        // P2P: layers outside this device's slice are still created (metadata) but flagged so
-        // the model loader and allocator skip their data + buffers. When no partition is active
-        // (whole model), p2p_skip is always false and this is byte-for-byte the stock path.
-        const bool p2p_skip = !hparams.p2p_layer_loaded((uint32_t) i);
-        auto mark = [&](ggml_tensor * t) -> ggml_tensor * {
-            if (p2p_skip && t) { t->flags |= GGML_TENSOR_FLAG_SKIP_ALLOC; }
-            return t;
-        };
+        layer.attn_norm      = create_tensor(tn(LLM_TENSOR_ATTN_NORM,      "weight", g), {n_embd}, 0);
+        layer.attn_post_norm = create_tensor(tn(LLM_TENSOR_ATTN_POST_NORM, "weight", g), {n_embd}, 0);
 
-        layer.attn_norm      = mark(create_tensor(tn(LLM_TENSOR_ATTN_NORM,      "weight", i), {n_embd}, 0));
-        layer.attn_post_norm = mark(create_tensor(tn(LLM_TENSOR_ATTN_POST_NORM, "weight", i), {n_embd}, 0));
+        create_tensor_qkv(layer, g, n_embd, n_head * n_rot, n_head_kv * n_rot, n_head_kv * n_rot, 0);
+        layer.wo = create_tensor(tn(LLM_TENSOR_ATTN_OUT, "weight", g), {n_head * n_rot, n_embd}, 0);
 
-        create_tensor_qkv(layer, i, n_embd, n_head * n_rot, n_head_kv * n_rot, n_head_kv * n_rot, 0);
-        // flag whatever create_tensor_qkv produced (fused wqkv or separate wq/wk/wv, + biases)
-        mark(layer.wqkv); mark(layer.wqkv_b);
-        mark(layer.wq); mark(layer.wk); mark(layer.wv);
-        mark(layer.wq_b); mark(layer.wk_b); mark(layer.wv_b);
+        layer.attn_sinks = create_tensor(tn(LLM_TENSOR_ATTN_SINKS, "weight", g), {n_head}, 0);
 
-        layer.wo = mark(create_tensor(tn(LLM_TENSOR_ATTN_OUT, "weight", i), {n_head * n_rot, n_embd}, 0));
+        layer.ffn_gate_inp  = create_tensor(tn(LLM_TENSOR_FFN_GATE_INP,  "weight", g), {  n_embd, n_expert}, 0);
+        layer.ffn_gate_exps = create_tensor(tn(LLM_TENSOR_FFN_GATE_EXPS, "weight", g), {  n_embd, n_ff_exp, n_expert}, 0);
+        layer.ffn_down_exps = create_tensor(tn(LLM_TENSOR_FFN_DOWN_EXPS, "weight", g), {n_ff_exp,   n_embd, n_expert}, 0);
+        layer.ffn_up_exps   = create_tensor(tn(LLM_TENSOR_FFN_UP_EXPS,   "weight", g), {  n_embd, n_ff_exp, n_expert}, 0);
 
-        layer.attn_sinks = mark(create_tensor(tn(LLM_TENSOR_ATTN_SINKS, "weight", i), {n_head}, 0));
+        layer.wo_b = create_tensor(tn(LLM_TENSOR_ATTN_OUT, "bias", g), {n_embd}, 0);
 
-        layer.ffn_gate_inp  = mark(create_tensor(tn(LLM_TENSOR_FFN_GATE_INP,  "weight", i), {  n_embd, n_expert}, 0));
-        layer.ffn_gate_exps = mark(create_tensor(tn(LLM_TENSOR_FFN_GATE_EXPS, "weight", i), {  n_embd, n_ff_exp, n_expert}, 0));
-        layer.ffn_down_exps = mark(create_tensor(tn(LLM_TENSOR_FFN_DOWN_EXPS, "weight", i), {n_ff_exp,   n_embd, n_expert}, 0));
-        layer.ffn_up_exps   = mark(create_tensor(tn(LLM_TENSOR_FFN_UP_EXPS,   "weight", i), {  n_embd, n_ff_exp, n_expert}, 0));
-
-        layer.wo_b = mark(create_tensor(tn(LLM_TENSOR_ATTN_OUT, "bias", i), {n_embd}, 0));
-
-        layer.ffn_gate_inp_b  = mark(create_tensor(tn(LLM_TENSOR_FFN_GATE_INP,  "bias", i), {n_expert}, 0));
-        layer.ffn_gate_exps_b = mark(create_tensor(tn(LLM_TENSOR_FFN_GATE_EXPS, "bias", i), {n_ff_exp, n_expert}, 0));
-        layer.ffn_down_exps_b = mark(create_tensor(tn(LLM_TENSOR_FFN_DOWN_EXPS, "bias", i), {  n_embd, n_expert}, 0));
-        layer.ffn_up_exps_b   = mark(create_tensor(tn(LLM_TENSOR_FFN_UP_EXPS,   "bias", i), {n_ff_exp, n_expert}, 0));
+        layer.ffn_gate_inp_b  = create_tensor(tn(LLM_TENSOR_FFN_GATE_INP,  "bias", g), {n_expert}, 0);
+        layer.ffn_gate_exps_b = create_tensor(tn(LLM_TENSOR_FFN_GATE_EXPS, "bias", g), {n_ff_exp, n_expert}, 0);
+        layer.ffn_down_exps_b = create_tensor(tn(LLM_TENSOR_FFN_DOWN_EXPS, "bias", g), {  n_embd, n_expert}, 0);
+        layer.ffn_up_exps_b   = create_tensor(tn(LLM_TENSOR_FFN_UP_EXPS,   "bias", g), {n_ff_exp, n_expert}, 0);
     }
 }
 
@@ -88,16 +78,11 @@ llama_model_openai_moe::graph::graph(const llama_model & model, const llm_graph_
 
     ggml_tensor * inp_out_ids = build_inp_out_ids();
 
-    // P2P: this device computes only its layer slice [il_start, il_end). Defaults to the whole
-    // model [0, n_layer) — in which case this is byte-for-byte the stock loop. For il_start > 0
-    // the boundary hidden state fed into inpL is injected by the P2P scheduler (Phase 4/7);
-    // build_inp_embd above provides the input node.
-    const int il_start = (int) std::min<int64_t>(model.hparams.p2p_layer_start, n_layer);
-    const int il_end   = model.hparams.p2p_layer_end != 0
-                         ? (int) std::min<int64_t>(model.hparams.p2p_layer_end, n_layer)
-                         : (int) n_layer;
-
-    for (int il = il_start; il < il_end; ++il) {
+    // P2P: n_layer is this device's SLICE count (hparams was resized in load_hparams), and
+    // model.layers is stored compactly, so the stock [0, n_layer) loop already computes exactly
+    // this device's slice. (Ring note: for a mid-pipeline device the input hidden state must be
+    // fed into inpL from the previous device instead of build_inp_embd — wired in Phase 7.)
+    for (int il = 0; il < n_layer; ++il) {
         res->t_layer_inp[il] = inpL;
 
         const float freq_base_l  = model.get_rope_freq_base (cparams, il);
