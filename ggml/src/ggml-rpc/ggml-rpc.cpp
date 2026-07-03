@@ -11,6 +11,7 @@
 #include <vector>
 #include <memory>
 #include <mutex>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <cstring>
@@ -1860,6 +1861,14 @@ void ggml_backend_rpc_start_server(const char * endpoint, const char * cache_dir
         fprintf(stderr, "Failed to create server socket\n");
         return;
     }
+    // P2P (opt-in via env GGML_RPC_P2P_MT): serve each accepted connection on its own detached thread
+    // so a device can hold MULTIPLE simultaneous persistent incoming connections (e.g. a ring
+    // predecessor's SET_HIDDEN_STATE stream AND a prefill node's SET_PREFILL_DATA). The stock path
+    // stays SERIAL (one connection at a time) because concurrent stock ggml commands would race the
+    // shared `backends`; P2P commands never touch `backends` (they route to the app-registered handler,
+    // which serializes itself). `backends`/`cache_dir` outlive every thread (this function never
+    // returns), so passing them by ref/pointer to detached threads is safe.
+    const bool p2p_mt = getenv("GGML_RPC_P2P_MT") != nullptr;
     while (true) {
         auto client_socket = server_socket->accept();
         if (client_socket == nullptr) {
@@ -1868,9 +1877,13 @@ void ggml_backend_rpc_start_server(const char * endpoint, const char * cache_dir
         }
         printf("Accepted client connection\n");
         fflush(stdout);
-        rpc_serve_client(backends, cache_dir, client_socket);
-        printf("Client connection closed\n");
-        fflush(stdout);
+        if (p2p_mt) {
+            std::thread(rpc_serve_client, std::cref(backends), cache_dir, std::move(client_socket)).detach();
+        } else {
+            rpc_serve_client(backends, cache_dir, client_socket);
+            printf("Client connection closed\n");
+            fflush(stdout);
+        }
     }
     rpc_transport_shutdown();
     for (auto backend : backends) {
