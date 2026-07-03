@@ -318,6 +318,12 @@ private:
 
     bool state_read_meta(llama_io_read_i & io, uint32_t strm, uint32_t cell_count,       slot_info & sinfo, llama_seq_id dest_seq_id = -1);
     bool state_read_data(llama_io_read_i & io, uint32_t strm, uint32_t cell_count, const slot_info & sinfo);
+
+    // P2P (LLAMA_STATE_SEQ_FLAGS_LAYER_TAGGED): variants that prefix each layer's block with its
+    // GLOBAL layer index, so a dump can be loaded into a device owning a different contiguous slice.
+    // Separate functions (not overloads of the stock ones) so the upstream format path is untouched.
+    void state_write_data_tagged(llama_io_write_i & io, const cell_ranges_t & cr) const;
+    bool state_read_data_tagged(llama_io_read_i & io, uint32_t strm, uint32_t cell_count, const slot_info & sinfo);
 };
 
 class llama_kv_cache_context : public llama_memory_context_i {

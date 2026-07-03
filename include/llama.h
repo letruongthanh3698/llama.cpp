@@ -900,6 +900,14 @@ extern "C" {
 // Getting the state for a seq_id with this flag invalidates all prior states gotten for that seq_id with this flag.
 #define LLAMA_STATE_SEQ_FLAGS_ON_DEVICE 2
 
+// P2P (pipeline-parallel): tag every KV layer block with its GLOBAL layer index so a dump produced
+// by one device (or the full model) can be loaded into another device that owns only a contiguous
+// GLOBAL layer slice. On write, each layer's block is prefixed with [u32 global_il]. On read, blocks
+// whose global_il falls in this device's owned range are stored at the matching local compact layer;
+// blocks for non-owned layers are read-and-discarded. Layer-count equality is NOT required with this
+// flag. Stock (untagged) serialization is byte-unchanged when this bit is clear.
+#define LLAMA_STATE_SEQ_FLAGS_LAYER_TAGGED 4
+
     typedef uint32_t llama_state_seq_flags;
 
     LLAMA_API size_t llama_state_seq_get_size_ext(
