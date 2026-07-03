@@ -45,6 +45,7 @@ GGML_BACKEND_API ggml_backend_reg_t ggml_backend_rpc_add_server(const char * end
 enum ggml_rpc_p2p_cmd {
     GGML_RPC_P2P_CMD_SET_HIDDEN_STATE = 17,  // predecessor -> device: pre-norm hidden state (fire-and-forget)
     GGML_RPC_P2P_CMD_RETURN_TOKEN     = 18,  // tail -> head: sampled token id (fire-and-forget)
+    GGML_RPC_P2P_CMD_SET_PREFILL_DATA = 19,  // prefill node -> decoder node: serialized KV slice (handoff)
 };
 
 // Handler invoked on the SERVER for any P2P command. `in`/`in_len` is the payload (client_id already
