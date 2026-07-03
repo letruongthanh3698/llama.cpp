@@ -2228,7 +2228,11 @@ void llama_kv_cache::state_write_data_tagged(llama_io_write_i & io, const cell_r
     const auto & cells = v_cells[cr.strm];
 
     const uint32_t v_trans = this->v_trans ? 1 : 0;
-    const uint32_t n_layer = layers.size();
+    // n_layer = layers EMITTED (honors the optional [lo,hi) write restriction). The tagged reader
+    // iterates this count and maps each block by its global_il, so a restricted dump is self-consistent.
+    uint32_t n_layer = 0;
+    for (const auto & layer : layers)
+        if (hparams.p2p_tagged_write_emit(hparams.p2p_global_il(layer.il))) ++n_layer;
 
     io.write(&v_trans, sizeof(v_trans));
     io.write(&n_layer, sizeof(n_layer));
@@ -2237,6 +2241,7 @@ void llama_kv_cache::state_write_data_tagged(llama_io_write_i & io, const cell_r
     for (const auto & layer : layers) {
         const uint32_t il = layer.il;
         const uint32_t global_il = hparams.p2p_global_il(il);
+        if (!hparams.p2p_tagged_write_emit(global_il)) continue;   // out-of-range: skip (bandwidth opt)
         io.write(&global_il, sizeof(global_il));
 
         const uint32_t n_embd_k_gqa = hparams.n_embd_k_gqa(il);
@@ -2260,6 +2265,7 @@ void llama_kv_cache::state_write_data_tagged(llama_io_write_i & io, const cell_r
         for (const auto & layer : layers) {
             const uint32_t il = layer.il;
             const uint32_t global_il = hparams.p2p_global_il(il);
+            if (!hparams.p2p_tagged_write_emit(global_il)) continue;   // out-of-range: skip
             io.write(&global_il, sizeof(global_il));
 
             const uint32_t n_embd_v_gqa = hparams.n_embd_v_gqa(il);
@@ -2287,6 +2293,7 @@ void llama_kv_cache::state_write_data_tagged(llama_io_write_i & io, const cell_r
         for (const auto & layer : layers) {
             const uint32_t il = layer.il;
             const uint32_t global_il = hparams.p2p_global_il(il);
+            if (!hparams.p2p_tagged_write_emit(global_il)) continue;   // out-of-range: skip
             io.write(&global_il, sizeof(global_il));
 
             const uint32_t n_embd_v_gqa = hparams.n_embd_v_gqa(il);

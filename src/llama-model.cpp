@@ -2420,6 +2420,14 @@ void llama_model_set_p2p_active_layers(llama_model * model, int32_t n) {
     model->hparams.p2p_n_active_layers = n;
 }
 
+// Restrict the next LAYER_TAGGED KV dump to GLOBAL layers [lo, hi) (P2P handoff bandwidth opt: ship a
+// decoder only the layers it owns). lo < 0 clears the restriction (dump all). Set before
+// llama_state_seq_get_data_ext, reset (lo=-1) after. Shared hparams => not thread-safe across instances.
+void llama_model_set_tagged_write_range(llama_model * model, int32_t lo, int32_t hi) {
+    model->hparams.p2p_tagged_write_il_lo = lo;
+    model->hparams.p2p_tagged_write_il_hi = hi;
+}
+
 int32_t llama_model_n_layer_nextn(const llama_model * model) {
     return model->hparams.n_layer_nextn;
 }

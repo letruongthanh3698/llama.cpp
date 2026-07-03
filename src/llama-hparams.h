@@ -76,11 +76,24 @@ struct llama_hparams {
     // mid+N blocks = the N-block stack, tail+0 blocks = final norm+lm_head only.
     int32_t p2p_n_active_layers = -1;
 
+    // P2P handoff bandwidth opt: restrict a LAYER_TAGGED KV dump to GLOBAL layers [lo, hi) so a prefill
+    // node ships each decoder only the slice it owns (instead of the full dump filtered on read). -1 =
+    // no restriction (write all). Transient, set right before llama_state_seq_get_data_ext and reset
+    // after; NOT thread-safe across instances sharing the model (like p2p_n_active_layers).
+    int32_t p2p_tagged_write_il_lo = -1;
+    int32_t p2p_tagged_write_il_hi = -1;
+
     // Is a partial slice active? (i.e. n_layer_all was resized down to the slice)
     bool p2p_partitioned() const { return p2p_n_layer_full != 0; }
 
     // Map a compact (post-resize) layer index [0, n_slice) to its GLOBAL layer index (for GGUF names).
     uint32_t p2p_global_il(uint32_t il_compact) const { return p2p_layer_start + il_compact; }
+
+    // Should a tagged write EMIT this GLOBAL layer? (honors the [lo,hi) restriction above; all if lo<0)
+    bool p2p_tagged_write_emit(uint32_t global_il) const {
+        return p2p_tagged_write_il_lo < 0 ||
+               ((int32_t) global_il >= p2p_tagged_write_il_lo && (int32_t) global_il < p2p_tagged_write_il_hi);
+    }
 
     uint32_t n_expert = 0;
     uint32_t n_expert_used = 0;

@@ -579,6 +579,10 @@ extern "C" {
     // BENCH ONLY: set how many transformer blocks the graph runs this forward (-1 = all loaded).
     // 0 blocks + role override isolates one component (head=embed, mid=blocks, tail=finals).
     LLAMA_API void    llama_model_set_p2p_active_layers(struct llama_model * model, int32_t n);
+    // P2P handoff bandwidth opt: restrict the next LAYER_TAGGED KV dump to GLOBAL layers [lo, hi) so a
+    // prefill node ships each decoder only the slice it owns. lo < 0 clears (dump all). Set before
+    // llama_state_seq_get_data_ext, reset after; shared hparams => not thread-safe across instances.
+    LLAMA_API void    llama_model_set_tagged_write_range(struct llama_model * model, int32_t lo, int32_t hi);
     LLAMA_API int32_t llama_model_n_layer_nextn(const struct llama_model * model);
     LLAMA_API int32_t llama_model_n_head       (const struct llama_model * model);
     LLAMA_API int32_t llama_model_n_head_kv    (const struct llama_model * model);
