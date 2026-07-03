@@ -83,6 +83,12 @@ struct llama_hparams {
     int32_t p2p_tagged_write_il_lo = -1;
     int32_t p2p_tagged_write_il_hi = -1;
 
+    // P2P Case-3 delta: restrict a DELTA KV dump to cells with position in [lo, hi) (the new positions
+    // since the last sync). -1 = no restriction (write all in-window cells). Transient, same lifetime /
+    // thread-safety caveat as p2p_tagged_write_il_lo above.
+    int32_t p2p_tagged_write_pos_lo = -1;
+    int32_t p2p_tagged_write_pos_hi = -1;
+
     // Is a partial slice active? (i.e. n_layer_all was resized down to the slice)
     bool p2p_partitioned() const { return p2p_n_layer_full != 0; }
 
@@ -93,6 +99,12 @@ struct llama_hparams {
     bool p2p_tagged_write_emit(uint32_t global_il) const {
         return p2p_tagged_write_il_lo < 0 ||
                ((int32_t) global_il >= p2p_tagged_write_il_lo && (int32_t) global_il < p2p_tagged_write_il_hi);
+    }
+
+    // Should a DELTA write EMIT this cell POSITION? (honors the [lo,hi) pos restriction above; all if lo<0)
+    bool p2p_tagged_write_pos_emit(llama_pos pos) const {
+        return p2p_tagged_write_pos_lo < 0 ||
+               ((int32_t) pos >= p2p_tagged_write_pos_lo && (int32_t) pos < p2p_tagged_write_pos_hi);
     }
 
     uint32_t n_expert = 0;

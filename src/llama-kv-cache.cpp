@@ -1998,10 +1998,27 @@ void llama_kv_cache::state_write(llama_io_write_i & io, llama_seq_id seq_id, lla
             add_cell = add_cell && (seq_id == -1 || cells.seq_has(i, seq_id));
 
             // check the cell is not SWA-masked
-            if (add_cell && seq_id != -1) {
+            // P2P Case-3 DELTA on an SWA sub-cache: ship ALL resident SWA cells (skip this mask). The
+            // n_swa (128) window mask is EMPIRICALLY INSUFFICIENT for the receiver to recompute later
+            // positions bit-exact — verified in tests/p2p_kv_roundtrip.cpp PROBE B: shipping only the
+            // masked 128-cell window diverges (maxabs 8.7 on gpt-oss), shipping the full resident window
+            // is bit-exact. The SWA cache is size-bounded (~n_swa + n_ubatch, e.g. 768), so this is cheap.
+            const bool delta_swa = (flags & LLAMA_STATE_SEQ_FLAGS_DELTA) && swa_type != LLAMA_SWA_TYPE_NONE;
+            if (add_cell && seq_id != -1 && !delta_swa) {
                 const bool is_masked = llama_hparams::is_masked_swa(n_swa, swa_type, cells.pos_get(i), cells.seq_pos_max(seq_id));
 
                 add_cell = !is_masked;
+            }
+
+            // P2P Case-3 DELTA: per-sub-cache reconciliation. For the BASE (full-attention) sub-cache,
+            // ship only cells whose position is in the write-side [lo,hi) range (the positions added
+            // this turn) — the receiver APPENDS them. For an SWA sub-cache we do NOT restrict by the
+            // pos range: the SWA mask above already trims to the current window, so we emit the FULL
+            // window and the receiver REPLACES its SWA cells (a rolling window is not append-able —
+            // masking the delta to the writer's window leaves the receiver's window non-canonical).
+            // Inert unless DELTA is set AND (for base) a pos range was configured.
+            if (add_cell && (flags & LLAMA_STATE_SEQ_FLAGS_DELTA) && swa_type == LLAMA_SWA_TYPE_NONE) {
+                add_cell = hparams.p2p_tagged_write_pos_emit(cells.pos_get(i));
             }
 
             if (add_cell) {
@@ -2071,7 +2088,11 @@ void llama_kv_cache::state_read(llama_io_read_i & io, llama_seq_id seq_id, llama
         slot_info sinfo;
 
         bool res = true;
-        res = res && state_read_meta(io, strm, cell_count, sinfo, seq_id, (flags & LLAMA_STATE_SEQ_FLAGS_MERGE) != 0);
+        // DELTA append applies to the BASE (full-attention) sub-cache only; an SWA sub-cache does a
+        // normal REPLACE load of the shipped FULL resident window (see state_write) so its window stays
+        // canonical — the n_swa mask is insufficient, so the whole resident SWA cache is shipped/replaced.
+        const bool delta_append = (flags & LLAMA_STATE_SEQ_FLAGS_DELTA) != 0 && swa_type == LLAMA_SWA_TYPE_NONE;
+        res = res && state_read_meta(io, strm, cell_count, sinfo, seq_id, (flags & LLAMA_STATE_SEQ_FLAGS_MERGE) != 0, delta_append);
         if (flags & LLAMA_STATE_SEQ_FLAGS_LAYER_TAGGED) {
             res = res && state_read_data_tagged(io, strm, cell_count, sinfo);
         } else {
@@ -2323,7 +2344,7 @@ void llama_kv_cache::state_write_data_tagged(llama_io_write_i & io, const cell_r
     }
 }
 
-bool llama_kv_cache::state_read_meta(llama_io_read_i & io, uint32_t strm, uint32_t cell_count, slot_info & sinfo, llama_seq_id dest_seq_id, bool merge) {
+bool llama_kv_cache::state_read_meta(llama_io_read_i & io, uint32_t strm, uint32_t cell_count, slot_info & sinfo, llama_seq_id dest_seq_id, bool merge, bool append) {
     auto & cells = v_cells[strm];
     auto & head  = v_heads[strm];
 
@@ -2366,7 +2387,12 @@ bool llama_kv_cache::state_read_meta(llama_io_read_i & io, uint32_t strm, uint32
 
     if (dest_seq_id != -1) {
         // single sequence
-        seq_rm(dest_seq_id, -1, -1);
+        // P2P Case-3 DELTA append: the seq already holds [0,X); do NOT clear it. The incoming cells are
+        // NEW positions [X,Y) — find_slot() below places them in free cells beside the existing ones,
+        // reconstructing [0,Y). (Non-append = the stock load, which replaces the seq.)
+        if (!append) {
+            seq_rm(dest_seq_id, -1, -1);
+        }
 
         llama_batch_allocr balloc(hparams.n_pos_per_embd());
 

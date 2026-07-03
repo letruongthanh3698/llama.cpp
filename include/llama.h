@@ -583,6 +583,11 @@ extern "C" {
     // prefill node ships each decoder only the slice it owns. lo < 0 clears (dump all). Set before
     // llama_state_seq_get_data_ext, reset after; shared hparams => not thread-safe across instances.
     LLAMA_API void    llama_model_set_tagged_write_range(struct llama_model * model, int32_t lo, int32_t hi);
+    // P2P Case-3 delta: restrict the next DELTA KV dump to cells with position in [lo, hi) (the new
+    // positions since the last sync). lo < 0 clears (dump all in-window cells). Set before
+    // llama_state_seq_get_data_ext with LLAMA_STATE_SEQ_FLAGS_DELTA, reset after; shared hparams =>
+    // not thread-safe across instances.
+    LLAMA_API void    llama_model_set_tagged_write_pos_range(struct llama_model * model, int32_t lo, int32_t hi);
     LLAMA_API int32_t llama_model_n_layer_nextn(const struct llama_model * model);
     LLAMA_API int32_t llama_model_n_head       (const struct llama_model * model);
     LLAMA_API int32_t llama_model_n_head_kv    (const struct llama_model * model);
@@ -918,6 +923,16 @@ extern "C" {
 // sequence — it reuses the existing cells (matched by position) and writes only the incoming layers,
 // leaving layers loaded by prior merges intact. The first load is a normal (non-MERGE) tagged load.
 #define LLAMA_STATE_SEQ_FLAGS_MERGE 8
+
+// P2P Case-3 delta (incremental, multi-turn). A DELTA dump ships only the cells whose position falls
+// in the write-side range set by llama_model_set_tagged_write_pos_range() (the positions added since
+// the last sync). SWA is handled for free: the writer already masks out-of-window cells per sub-cache,
+// so a sliding-window layer ships only its in-window delta while a full-attention layer ships the
+// appended positions. On READ, DELTA does NOT clear/replace the sequence and does NOT reuse existing
+// cells (that is MERGE) — it APPENDS the incoming positions into free cells beside the sequence's
+// existing [0,X) KV (find_slot places them), reconstructing [0,Y). May be combined with LAYER_TAGGED
+// for a cross-slice delta. Stock serialization is byte-unchanged when this bit is clear.
+#define LLAMA_STATE_SEQ_FLAGS_DELTA 16
 
     typedef uint32_t llama_state_seq_flags;
 

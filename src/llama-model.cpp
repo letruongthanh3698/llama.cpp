@@ -2428,6 +2428,11 @@ void llama_model_set_tagged_write_range(llama_model * model, int32_t lo, int32_t
     model->hparams.p2p_tagged_write_il_hi = hi;
 }
 
+void llama_model_set_tagged_write_pos_range(llama_model * model, int32_t lo, int32_t hi) {
+    model->hparams.p2p_tagged_write_pos_lo = lo;
+    model->hparams.p2p_tagged_write_pos_hi = hi;
+}
+
 int32_t llama_model_n_layer_nextn(const llama_model * model) {
     return model->hparams.n_layer_nextn;
 }
