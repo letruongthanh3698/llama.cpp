@@ -70,6 +70,12 @@ struct llama_hparams {
     bool p2p_is_head = true;   // slice starts at layer 0
     bool p2p_is_tail = true;   // slice ends at the last layer
 
+    // BENCH ONLY: number of transformer blocks the graph should actually execute this forward,
+    // independent of how many are loaded. -1 = run all loaded blocks (normal). Lets one loaded
+    // slice measure each component in isolation without reloading: head+0 blocks = embed only,
+    // mid+N blocks = the N-block stack, tail+0 blocks = final norm+lm_head only.
+    int32_t p2p_n_active_layers = -1;
+
     // Is a partial slice active? (i.e. n_layer_all was resized down to the slice)
     bool p2p_partitioned() const { return p2p_n_layer_full != 0; }
 

@@ -573,6 +573,12 @@ extern "C" {
     // A single-device full model returns true for both. Used to branch head/mid/tail behaviour.
     LLAMA_API bool    llama_model_p2p_is_head  (const struct llama_model * model);
     LLAMA_API bool    llama_model_p2p_is_tail  (const struct llama_model * model);
+    // BENCH ONLY: force the head/tail roles at runtime (any slice can act as head/mid/tail; FLOP is
+    // weight-independent). Lets one loaded slice be timed as embed+blocks / blocks / blocks+finals.
+    LLAMA_API void    llama_model_set_p2p_role (struct llama_model * model, bool is_head, bool is_tail);
+    // BENCH ONLY: set how many transformer blocks the graph runs this forward (-1 = all loaded).
+    // 0 blocks + role override isolates one component (head=embed, mid=blocks, tail=finals).
+    LLAMA_API void    llama_model_set_p2p_active_layers(struct llama_model * model, int32_t n);
     LLAMA_API int32_t llama_model_n_layer_nextn(const struct llama_model * model);
     LLAMA_API int32_t llama_model_n_head       (const struct llama_model * model);
     LLAMA_API int32_t llama_model_n_head_kv    (const struct llama_model * model);
@@ -988,6 +994,10 @@ extern "C" {
     // Set whether to use causal attention or not
     // If set to true, the model will only attend to the past tokens
     LLAMA_API void llama_set_causal_attn(struct llama_context * ctx, bool causal_attn);
+
+    // BENCH ONLY: disable graph reuse so the next llama_decode rebuilds the graph from the current
+    // hparams. Needed when the device role / active-layer count is flipped at runtime between forwards.
+    LLAMA_API void llama_set_graph_reuse_disable(struct llama_context * ctx, bool disable);
 
     // Set whether the model is in warmup mode or not
     // If true, all model tensors are activated during llama_decode() to load and cache their weights.

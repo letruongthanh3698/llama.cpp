@@ -1,5 +1,7 @@
 #include "models.h"
 
+#include <algorithm>   // std::min (BENCH: n_run cap)
+
 void llama_model_openai_moe::load_arch_hparams(llama_model_loader & ml) {
     ml.get_key(LLM_KV_ATTENTION_LAYERNORM_RMS_EPS, hparams.f_norm_rms_eps);
     ml.get_key(LLM_KV_EXPERT_FEED_FORWARD_LENGTH,  hparams.n_ff_exp);
@@ -71,10 +73,17 @@ llama_model_openai_moe::graph::graph(const llama_model & model, const llm_graph_
 
     inpL = build_inp_embd(model.tok_embd);
 
-    // inp_pos - contains the positions
-    ggml_tensor * inp_pos = build_inp_pos();
+    // BENCH: how many blocks to actually run (default = all loaded). 0 blocks isolates embed (head)
+    // or finals (tail) on a fully-loaded slice. Inputs used ONLY inside the block loop (positions,
+    // attention/KV) must NOT be created when n_run == 0 — an unused input stays unallocated and
+    // would fail set_input's buffer assert (see process_ubatch's FIXME on unused model inputs).
+    const int n_run = hparams.p2p_n_active_layers >= 0
+        ? std::min<int>(hparams.p2p_n_active_layers, n_layer) : n_layer;
 
-    auto * inp_attn = build_attn_inp_kv_iswa();
+    // inp_pos - contains the positions
+    ggml_tensor * inp_pos = n_run > 0 ? build_inp_pos() : nullptr;
+
+    auto * inp_attn = n_run > 0 ? build_attn_inp_kv_iswa() : nullptr;
 
     // TAIL only: out_ids gathers the output rows before norm+lm_head. A mid/head ring device
     // exports the full-width hidden state and never gathers, so it must NOT create this input
@@ -85,7 +94,7 @@ llama_model_openai_moe::graph::graph(const llama_model & model, const llm_graph_
     // model.layers is stored compactly, so the stock [0, n_layer) loop already computes exactly
     // this device's slice. (Ring note: for a mid-pipeline device the input hidden state must be
     // fed into inpL from the previous device instead of build_inp_embd — wired in Phase 7.)
-    for (int il = 0; il < n_layer; ++il) {
+    for (int il = 0; il < n_run; ++il) {
         res->t_layer_inp[il] = inpL;
 
         const float freq_base_l  = model.get_rope_freq_base (cparams, il);
@@ -127,7 +136,7 @@ llama_model_openai_moe::graph::graph(const llama_model & model, const llm_graph_
 
             cb(cur, "attn_out", il);
         }
-        if (il == n_layer - 1 && hparams.p2p_is_tail) {
+        if (il == n_run - 1 && hparams.p2p_is_tail) {
             // skip computing output for unused tokens — TAIL ONLY. A mid/head ring device must
             // forward the FULL-width hidden state (the next device's attention needs every
             // position), so the out_ids reduction is applied only where logits are produced.
@@ -166,6 +175,13 @@ llama_model_openai_moe::graph::graph(const llama_model & model, const llm_graph_
         inpL = cur;
     }
     cur = inpL;   // pre-final-norm residual (the ring boundary hidden state)
+
+    // BENCH: with 0 blocks run, the in-loop out_ids gather above never fired, so the tail's
+    // finals would run over EVERY input position. Gather the output rows here so the isolated
+    // "finals" measurement matches a real forward (prefill: only the last token → 1 lm_head row).
+    if (hparams.p2p_is_tail && n_run == 0) {
+        cur = ggml_get_rows(ctx0, cur, inp_out_ids);
+    }
 
     if (!hparams.p2p_is_tail) {
         // MID / HEAD ring device: export the PRE-norm hidden state and stop. The successor device

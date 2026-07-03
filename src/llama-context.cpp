@@ -3662,6 +3662,10 @@ void llama_set_causal_attn(llama_context * ctx, bool causal_attn) {
     ctx->set_causal_attn(causal_attn);
 }
 
+void llama_set_graph_reuse_disable(llama_context * ctx, bool disable) {
+    ctx->set_graph_reuse_disable(disable);
+}
+
 void llama_set_warmup(llama_context * ctx, bool warmup) {
     ctx->set_warmup(warmup);
 }

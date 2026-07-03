@@ -2404,6 +2404,22 @@ bool llama_model_p2p_is_tail(const llama_model * model) {
     return model->hparams.p2p_is_tail;
 }
 
+// Override the device roles at runtime (BENCH ONLY). tok_embd/output_norm/output are always loaded,
+// so any slice can be forced to act as head (apply embed), mid (neither) or tail (apply norm+lm_head)
+// without loading a different slice — the FLOP is weight-independent, so the timing is representative.
+void llama_model_set_p2p_role(llama_model * model, bool is_head, bool is_tail) {
+    model->hparams.p2p_is_head = is_head;
+    model->hparams.p2p_is_tail = is_tail;
+}
+
+// Override how many transformer blocks the graph executes (BENCH ONLY). n < 0 restores "all loaded
+// blocks". With n == 0 the graph runs no blocks — combined with the role override this isolates a
+// single component: head+0 = embed, mid+N = the block stack, tail+0 = final norm+lm_head. The blocks
+// and KV cache stay loaded/initialised (no 0-layer load), they are simply not run this forward.
+void llama_model_set_p2p_active_layers(llama_model * model, int32_t n) {
+    model->hparams.p2p_n_active_layers = n;
+}
+
 int32_t llama_model_n_layer_nextn(const llama_model * model) {
     return model->hparams.n_layer_nextn;
 }
