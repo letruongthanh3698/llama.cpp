@@ -2433,6 +2433,10 @@ void llama_model_set_tagged_write_pos_range(llama_model * model, int32_t lo, int
     model->hparams.p2p_tagged_write_pos_hi = hi;
 }
 
+void llama_model_set_delta_swa_full_replace(llama_model * model, int32_t full_replace) {
+    model->hparams.p2p_delta_swa_full_replace = full_replace;
+}
+
 int32_t llama_model_n_layer_nextn(const llama_model * model) {
     return model->hparams.n_layer_nextn;
 }

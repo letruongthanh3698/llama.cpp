@@ -588,6 +588,9 @@ extern "C" {
     // llama_state_seq_get_data_ext with LLAMA_STATE_SEQ_FLAGS_DELTA, reset after; shared hparams =>
     // not thread-safe across instances.
     LLAMA_API void    llama_model_set_tagged_write_pos_range(struct llama_model * model, int32_t lo, int32_t hi);
+    // P2P Case-3 DELTA SWA mode: 0 = incremental append (default; ship only the new unmasked SWA cells,
+    // receiver rolls — bit-exact + cheapest). 1 = full-resident replace (ship all resident SWA, robust).
+    LLAMA_API void    llama_model_set_delta_swa_full_replace(struct llama_model * model, int32_t full_replace);
     LLAMA_API int32_t llama_model_n_layer_nextn(const struct llama_model * model);
     LLAMA_API int32_t llama_model_n_head       (const struct llama_model * model);
     LLAMA_API int32_t llama_model_n_head_kv    (const struct llama_model * model);

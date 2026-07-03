@@ -1998,26 +1998,26 @@ void llama_kv_cache::state_write(llama_io_write_i & io, llama_seq_id seq_id, lla
             add_cell = add_cell && (seq_id == -1 || cells.seq_has(i, seq_id));
 
             // check the cell is not SWA-masked
-            // P2P Case-3 DELTA on an SWA sub-cache: ship ALL resident SWA cells (skip this mask). The
-            // n_swa (128) window mask is EMPIRICALLY INSUFFICIENT for the receiver to recompute later
-            // positions bit-exact — verified in tests/p2p_kv_roundtrip.cpp PROBE B: shipping only the
-            // masked 128-cell window diverges (maxabs 8.7 on gpt-oss), shipping the full resident window
-            // is bit-exact. The SWA cache is size-bounded (~n_swa + n_ubatch, e.g. 768), so this is cheap.
-            const bool delta_swa = (flags & LLAMA_STATE_SEQ_FLAGS_DELTA) && swa_type != LLAMA_SWA_TYPE_NONE;
+            // P2P Case-3 DELTA on an SWA sub-cache always ships UNMASKED cells (skip this mask): the n_swa
+            // (128) window mask is EMPIRICALLY INSUFFICIENT — truncating to it drops cells the receiver's
+            // later attention needs (PROBE B / Test6 regime b: masked => 0.013 logit drift; unmasked =>
+            // bit-exact). Default = INCREMENTAL (pos-range below + APPEND on read): ship only the NEW cells
+            // and the receiver rolls. Fallback p2p_delta_swa_full_replace = ship ALL resident + REPLACE.
+            const bool delta   = (flags & LLAMA_STATE_SEQ_FLAGS_DELTA) != 0;
+            const bool is_swa  = swa_type != LLAMA_SWA_TYPE_NONE;
+            const bool delta_swa = delta && is_swa;
             if (add_cell && seq_id != -1 && !delta_swa) {
                 const bool is_masked = llama_hparams::is_masked_swa(n_swa, swa_type, cells.pos_get(i), cells.seq_pos_max(seq_id));
 
                 add_cell = !is_masked;
             }
 
-            // P2P Case-3 DELTA: per-sub-cache reconciliation. For the BASE (full-attention) sub-cache,
-            // ship only cells whose position is in the write-side [lo,hi) range (the positions added
-            // this turn) — the receiver APPENDS them. For an SWA sub-cache we do NOT restrict by the
-            // pos range: the SWA mask above already trims to the current window, so we emit the FULL
-            // window and the receiver REPLACES its SWA cells (a rolling window is not append-able —
-            // masking the delta to the writer's window leaves the receiver's window non-canonical).
-            // Inert unless DELTA is set AND (for base) a pos range was configured.
-            if (add_cell && (flags & LLAMA_STATE_SEQ_FLAGS_DELTA) && swa_type == LLAMA_SWA_TYPE_NONE) {
+            // P2P Case-3 DELTA pos-range filter: ship only cells whose position is in the write-side
+            // [lo,hi) range (the positions added this turn). Applies to the BASE sub-cache always, and to
+            // an SWA sub-cache by default (incremental append). The full-resident REPLACE fallback
+            // (p2p_delta_swa_full_replace) ignores the range for SWA and ships every resident cell.
+            const bool apply_pos = delta && (!is_swa || !hparams.p2p_delta_swa_full_replace);
+            if (add_cell && apply_pos) {
                 add_cell = hparams.p2p_tagged_write_pos_emit(cells.pos_get(i));
             }
 
@@ -2088,10 +2088,11 @@ void llama_kv_cache::state_read(llama_io_read_i & io, llama_seq_id seq_id, llama
         slot_info sinfo;
 
         bool res = true;
-        // DELTA append applies to the BASE (full-attention) sub-cache only; an SWA sub-cache does a
-        // normal REPLACE load of the shipped FULL resident window (see state_write) so its window stays
-        // canonical — the n_swa mask is insufficient, so the whole resident SWA cache is shipped/replaced.
-        const bool delta_append = (flags & LLAMA_STATE_SEQ_FLAGS_DELTA) != 0 && swa_type == LLAMA_SWA_TYPE_NONE;
+        // DELTA append: BASE (full-attention) always appends; an SWA sub-cache APPENDS the incremental
+        // (unmasked new) cells by default (the SWA cache rolls old cells out), OR REPLACES when the
+        // p2p_delta_swa_full_replace fallback ships the full resident window.
+        const bool delta_append = (flags & LLAMA_STATE_SEQ_FLAGS_DELTA) != 0 &&
+                                  (swa_type == LLAMA_SWA_TYPE_NONE || !hparams.p2p_delta_swa_full_replace);
         res = res && state_read_meta(io, strm, cell_count, sinfo, seq_id, (flags & LLAMA_STATE_SEQ_FLAGS_MERGE) != 0, delta_append);
         if (flags & LLAMA_STATE_SEQ_FLAGS_LAYER_TAGGED) {
             res = res && state_read_data_tagged(io, strm, cell_count, sinfo);
