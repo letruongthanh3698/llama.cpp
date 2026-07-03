@@ -7,6 +7,8 @@
 #include "llama-batch.h"
 #include "llama-io.h"
 #include "llama-memory.h"
+#include "llama-kv-cache.h"
+#include "llama-kv-cache-iswa.h"
 #include "llama-mmap.h"
 #include "llama-model.h"
 #include "llama-ext.h"
@@ -3735,6 +3737,26 @@ llama_memory_t llama_get_memory(const struct llama_context * ctx) {
     }
 
     return ctx->get_memory();
+}
+
+int32_t llama_kv_swa_debug_positions(const struct llama_context * ctx, llama_seq_id seq_id, llama_pos * out, int32_t max_cells) {
+    if (!ctx) return 0;
+    llama_memory_i * mem = ctx->get_memory();
+    llama_kv_cache * swa = nullptr;
+    if (auto * iswa = dynamic_cast<llama_kv_cache_iswa *>(mem)) {
+        swa = iswa->get_swa();                 // iSWA model: the sliding-window sub-cache
+    } else {
+        swa = dynamic_cast<llama_kv_cache *>(mem);   // non-iSWA: the single cache
+    }
+    if (!swa) return 0;
+    std::vector<llama_pos> pos;
+    swa->p2p_debug_cell_positions(seq_id, pos);
+    const int32_t n = (int32_t) pos.size();
+    if (out) {
+        const int32_t m = n < max_cells ? n : max_cells;
+        for (int32_t i = 0; i < m; ++i) out[i] = pos[i];
+    }
+    return n;
 }
 
 float * llama_get_embeddings_nextn(llama_context * ctx) {

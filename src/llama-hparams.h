@@ -89,13 +89,6 @@ struct llama_hparams {
     int32_t p2p_tagged_write_pos_lo = -1;
     int32_t p2p_tagged_write_pos_hi = -1;
 
-    // P2P Case-3 DELTA SWA mode (bandwidth). Default (0) = INCREMENTAL: a DELTA write of an SWA sub-cache
-    // ships only the NEW cells in the pos range (UNMASKED — the n_swa window mask is insufficient), and
-    // the receiver APPENDS them (the SWA cache rolls old ones out). Cheapest and bit-exact (verified
-    // tests/p2p_kv_roundtrip.cpp Test6). 1 = full-resident REPLACE: ship ALL resident SWA cells and
-    // replace — robust fallback, more bandwidth.
-    int32_t p2p_delta_swa_full_replace = 0;
-
     // Is a partial slice active? (i.e. n_layer_all was resized down to the slice)
     bool p2p_partitioned() const { return p2p_n_layer_full != 0; }
 

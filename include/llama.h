@@ -561,6 +561,11 @@ extern "C" {
     LLAMA_API           llama_memory_t   llama_get_memory  (const struct llama_context * ctx);
     LLAMA_API  enum llama_pooling_type   llama_pooling_type(const struct llama_context * ctx); // TODO: rename to llama_get_pooling_type
 
+    // P2P debug/introspection: dump the SWA (sliding-window) sub-cache's PHYSICAL cell -> position map.
+    // Fills out[i] with the position held by physical cell i for seq_id, or -1 if empty/other-seq. Returns
+    // the SWA cache size (# physical cells; call with out=NULL to query size). 0 if the model has no SWA.
+    LLAMA_API int32_t llama_kv_swa_debug_positions(const struct llama_context * ctx, llama_seq_id seq_id, llama_pos * out, int32_t max_cells);
+
     LLAMA_API const struct llama_vocab * llama_model_get_vocab(const struct llama_model * model);
     LLAMA_API enum llama_rope_type       llama_model_rope_type(const struct llama_model * model);
 
@@ -588,9 +593,6 @@ extern "C" {
     // llama_state_seq_get_data_ext with LLAMA_STATE_SEQ_FLAGS_DELTA, reset after; shared hparams =>
     // not thread-safe across instances.
     LLAMA_API void    llama_model_set_tagged_write_pos_range(struct llama_model * model, int32_t lo, int32_t hi);
-    // P2P Case-3 DELTA SWA mode: 0 = incremental append (default; ship only the new unmasked SWA cells,
-    // receiver rolls — bit-exact + cheapest). 1 = full-resident replace (ship all resident SWA, robust).
-    LLAMA_API void    llama_model_set_delta_swa_full_replace(struct llama_model * model, int32_t full_replace);
     LLAMA_API int32_t llama_model_n_layer_nextn(const struct llama_model * model);
     LLAMA_API int32_t llama_model_n_head       (const struct llama_model * model);
     LLAMA_API int32_t llama_model_n_head_kv    (const struct llama_model * model);

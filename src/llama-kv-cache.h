@@ -156,6 +156,10 @@ public:
     uint32_t get_size()     const;
     uint32_t get_n_stream() const;
 
+    // P2P debug/introspection: for stream 0, fill out[i] with the position held by physical cell i, or
+    // -1 if the cell is empty or does not hold seq_id. out is resized to the cache size (get_size()).
+    void p2p_debug_cell_positions(llama_seq_id seq_id, std::vector<llama_pos> & out) const;
+
     bool get_has_shift() const;
 
     ggml_type type_k() const;

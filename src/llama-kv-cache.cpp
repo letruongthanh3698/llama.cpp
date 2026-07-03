@@ -1203,6 +1203,16 @@ uint32_t llama_kv_cache::get_size() const {
     return cells.size();
 }
 
+void llama_kv_cache::p2p_debug_cell_positions(llama_seq_id seq_id, std::vector<llama_pos> & out) const {
+    const auto & cells = v_cells[seq_to_stream[seq_id < 0 ? 0 : seq_id]];
+    out.assign(cells.size(), -1);
+    for (uint32_t i = 0; i < cells.size(); ++i) {
+        if (!cells.is_empty(i) && (seq_id < 0 || cells.seq_has(i, seq_id))) {
+            out[i] = cells.pos_get(i);
+        }
+    }
+}
+
 uint32_t llama_kv_cache::get_n_stream() const {
     return n_stream;
 }
@@ -1998,11 +2008,10 @@ void llama_kv_cache::state_write(llama_io_write_i & io, llama_seq_id seq_id, lla
             add_cell = add_cell && (seq_id == -1 || cells.seq_has(i, seq_id));
 
             // check the cell is not SWA-masked
-            // P2P Case-3 DELTA on an SWA sub-cache always ships UNMASKED cells (skip this mask): the n_swa
-            // (128) window mask is EMPIRICALLY INSUFFICIENT — truncating to it drops cells the receiver's
-            // later attention needs (PROBE B / Test6 regime b: masked => 0.013 logit drift; unmasked =>
-            // bit-exact). Default = INCREMENTAL (pos-range below + APPEND on read): ship only the NEW cells
-            // and the receiver rolls. Fallback p2p_delta_swa_full_replace = ship ALL resident + REPLACE.
+            // P2P Case-3 DELTA on an SWA sub-cache ships the NEW cells UNMASKED (skip this mask): the
+            // n_swa (128) window mask is EMPIRICALLY INSUFFICIENT — truncating to it drops cells the
+            // receiver's later attention needs (masked => logit drift; unmasked => bit-exact). The
+            // receiver reconstructs the ring buffer from these actual new positions (see state_read_meta).
             const bool delta   = (flags & LLAMA_STATE_SEQ_FLAGS_DELTA) != 0;
             const bool is_swa  = swa_type != LLAMA_SWA_TYPE_NONE;
             const bool delta_swa = delta && is_swa;
@@ -2013,10 +2022,8 @@ void llama_kv_cache::state_write(llama_io_write_i & io, llama_seq_id seq_id, lla
             }
 
             // P2P Case-3 DELTA pos-range filter: ship only cells whose position is in the write-side
-            // [lo,hi) range (the positions added this turn). Applies to the BASE sub-cache always, and to
-            // an SWA sub-cache by default (incremental append). The full-resident REPLACE fallback
-            // (p2p_delta_swa_full_replace) ignores the range for SWA and ships every resident cell.
-            const bool apply_pos = delta && (!is_swa || !hparams.p2p_delta_swa_full_replace);
+            // [lo,hi) range (the positions added this turn). Applies to BASE and SWA delta writes alike.
+            const bool apply_pos = delta && hparams.p2p_tagged_write_pos_lo >= 0;
             if (add_cell && apply_pos) {
                 add_cell = hparams.p2p_tagged_write_pos_emit(cells.pos_get(i));
             }
@@ -2088,11 +2095,10 @@ void llama_kv_cache::state_read(llama_io_read_i & io, llama_seq_id seq_id, llama
         slot_info sinfo;
 
         bool res = true;
-        // DELTA append: BASE (full-attention) always appends; an SWA sub-cache APPENDS the incremental
-        // (unmasked new) cells by default (the SWA cache rolls old cells out), OR REPLACES when the
-        // p2p_delta_swa_full_replace fallback ships the full resident window.
-        const bool delta_append = (flags & LLAMA_STATE_SEQ_FLAGS_DELTA) != 0 &&
-                                  (swa_type == LLAMA_SWA_TYPE_NONE || !hparams.p2p_delta_swa_full_replace);
+        // DELTA append: BASE (full-attention) always appends. An SWA sub-cache appends a SMALL delta
+        // (< n_swa cells) onto its rolled window, but ERASES + reloads for a LARGE delta (>= n_swa cells
+        // = the whole window was shipped) — that decision is made in state_read_meta from cell_count.
+        const bool delta_append = (flags & LLAMA_STATE_SEQ_FLAGS_DELTA) != 0;
         res = res && state_read_meta(io, strm, cell_count, sinfo, seq_id, (flags & LLAMA_STATE_SEQ_FLAGS_MERGE) != 0, delta_append);
         if (flags & LLAMA_STATE_SEQ_FLAGS_LAYER_TAGGED) {
             res = res && state_read_data_tagged(io, strm, cell_count, sinfo);
@@ -2389,7 +2395,7 @@ bool llama_kv_cache::state_read_meta(llama_io_read_i & io, uint32_t strm, uint32
     if (dest_seq_id != -1) {
         // single sequence
         // P2P Case-3 DELTA append: the seq already holds [0,X); do NOT clear it. The incoming cells are
-        // NEW positions [X,Y) — find_slot() below places them in free cells beside the existing ones,
+        // NEW positions [X,Y) which get placed beside the existing ones (rolling the SWA window forward),
         // reconstructing [0,Y). (Non-append = the stock load, which replaces the seq.)
         if (!append) {
             seq_rm(dest_seq_id, -1, -1);
@@ -2432,15 +2438,38 @@ bool llama_kv_cache::state_read_meta(llama_io_read_i & io, uint32_t strm, uint32
             ubatch.seq_id[i]   = &dest_seq_id;
         }
 
-        sinfo = find_slot(ubatch, false);
-        if (sinfo.empty()) {
-            LLAMA_LOG_ERROR("%s: failed to find %d available cells in kv cache\n", __func__,  cell_count);
-            return false;
-        }
+        if (swa_type != LLAMA_SWA_TYPE_NONE) {
+            // P2P Case-3: an SWA sub-cache is a rolling RING BUFFER (physical cell = pos % size, head =
+            // (max+1) % size). find_slot() does NOT reproduce that geometry for a load — a batched call
+            // drops cells into arbitrary evictable slots (gappy/mis-aligned window), and even replaying it
+            // per cell drifts under eviction because its head-reset heuristic depends on the cache's fill
+            // history. So place each cell DIRECTLY at its ring position and set the ring head, making the
+            // reconstructed window byte-identical to a monolithic decode (verified p2p_kv_roundtrip Test7,
+            // incl. mid-sequence eviction). find_slot() stays stock for all decode/prefill and the base
+            // cache; only this SWA-load reconstruction bypasses it.
+            const uint32_t size = cells.size();
+            sinfo.s0 = strm; sinfo.s1 = strm;
+            sinfo.resize(1);
+            sinfo.strm[0] = strm;
+            sinfo.idxs[0].resize(cell_count);
+            llama_pos max_pos = -1;
+            for (uint32_t i = 0; i < cell_count; ++i) {
+                sinfo.idxs[0][i] = (uint32_t) (ubatch.pos[i] % (llama_pos) size);
+                if (ubatch.pos[i] > max_pos) max_pos = ubatch.pos[i];
+            }
+            apply_ubatch(sinfo, ubatch);
+            v_heads[strm] = (uint32_t) ((max_pos + 1) % (llama_pos) size);   // ring head after the load
+        } else {
+            sinfo = find_slot(ubatch, false);               // base (full-attention): stock batched placement
+            if (sinfo.empty()) {
+                LLAMA_LOG_ERROR("%s: failed to find %d available cells in kv cache\n", __func__,  cell_count);
+                return false;
+            }
 
-        // TODO: we cannot yet restore llama_kv_cell_ext as the apply_ubatch() does not support it yet
-        //       see: https://github.com/ggml-org/llama.cpp/pull/16825#issuecomment-3460868350
-        apply_ubatch(sinfo, ubatch);
+            // TODO: we cannot yet restore llama_kv_cell_ext as the apply_ubatch() does not support it yet
+            //       see: https://github.com/ggml-org/llama.cpp/pull/16825#issuecomment-3460868350
+            apply_ubatch(sinfo, ubatch);
+        }
 
         LLAMA_LOG_DEBUG("%s: cell_count = %d, dest_seq_id = %d\n", __func__, cell_count, dest_seq_id);
 
