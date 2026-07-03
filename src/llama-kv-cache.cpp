@@ -2071,7 +2071,7 @@ void llama_kv_cache::state_read(llama_io_read_i & io, llama_seq_id seq_id, llama
         slot_info sinfo;
 
         bool res = true;
-        res = res && state_read_meta(io, strm, cell_count, sinfo, seq_id);
+        res = res && state_read_meta(io, strm, cell_count, sinfo, seq_id, (flags & LLAMA_STATE_SEQ_FLAGS_MERGE) != 0);
         if (flags & LLAMA_STATE_SEQ_FLAGS_LAYER_TAGGED) {
             res = res && state_read_data_tagged(io, strm, cell_count, sinfo);
         } else {
@@ -2323,9 +2323,46 @@ void llama_kv_cache::state_write_data_tagged(llama_io_write_i & io, const cell_r
     }
 }
 
-bool llama_kv_cache::state_read_meta(llama_io_read_i & io, uint32_t strm, uint32_t cell_count, slot_info & sinfo, llama_seq_id dest_seq_id) {
+bool llama_kv_cache::state_read_meta(llama_io_read_i & io, uint32_t strm, uint32_t cell_count, slot_info & sinfo, llama_seq_id dest_seq_id, bool merge) {
     auto & cells = v_cells[strm];
     auto & head  = v_heads[strm];
+
+    if (dest_seq_id != -1 && merge) {
+        // P2P fan-in MERGE: the seq already holds KV (a prior tagged load). Do NOT clear it. Read+verify
+        // the incoming meta against the seq's EXISTING cells (matched by position) and build sinfo from
+        // them, so state_read_data_tagged overwrites only the incoming layers and leaves the rest intact.
+        std::vector<uint32_t> existing;   // cells currently holding dest_seq_id
+        for (uint32_t i = 0; i < cells.size(); ++i) {
+            if (!cells.is_empty(i) && cells.seq_has(i, dest_seq_id)) existing.push_back(i);
+        }
+        if (existing.size() != cell_count) {
+            LLAMA_LOG_ERROR("%s: merge cell-count mismatch (have %zu, dump %u)\n", __func__, existing.size(), cell_count);
+            return false;
+        }
+        std::sort(existing.begin(), existing.end(),
+                  [&](uint32_t a, uint32_t b) { return cells.pos_get(a) < cells.pos_get(b); });   // pos-ascending == dump order
+
+        for (uint32_t i = 0; i < cell_count; ++i) {
+            llama_pos pos;
+            uint32_t  n_seq_id;
+            io.read(&pos,      sizeof(pos));
+            io.read(&n_seq_id, sizeof(n_seq_id));
+            if (n_seq_id != 1) { LLAMA_LOG_ERROR("%s: invalid seq_id-agnostic kv cell (merge)\n", __func__); return false; }
+            if (hparams.n_pos_per_embd() > 1) { llama_kv_cell_ext ext; io.read(&ext, sizeof(ext)); }
+            { llama_seq_id sid; io.read(&sid, sizeof(sid)); }   // discard; we keep the existing cell
+            if (cells.pos_get(existing[i]) != pos) {
+                LLAMA_LOG_ERROR("%s: merge position mismatch at %u (have %d, dump %d)\n",
+                                __func__, i, cells.pos_get(existing[i]), pos);
+                return false;
+            }
+        }
+
+        sinfo.s0 = strm; sinfo.s1 = strm;
+        sinfo.resize(1);
+        sinfo.strm[0] = strm;
+        sinfo.idxs[0] = existing;
+        return true;
+    }
 
     if (dest_seq_id != -1) {
         // single sequence

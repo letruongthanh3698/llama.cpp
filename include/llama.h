@@ -912,6 +912,13 @@ extern "C" {
 // flag. Stock (untagged) serialization is byte-unchanged when this bit is clear.
 #define LLAMA_STATE_SEQ_FLAGS_LAYER_TAGGED 4
 
+// P2P fan-in: MERGE a layer-tagged dump into a sequence that ALREADY holds KV, instead of replacing it.
+// Used with LAYER_TAGGED when a decoder device receives its layer slice from several prefill devices
+// (each shipping a different layer sub-range for the same positions). The read does NOT clear the
+// sequence — it reuses the existing cells (matched by position) and writes only the incoming layers,
+// leaving layers loaded by prior merges intact. The first load is a normal (non-MERGE) tagged load.
+#define LLAMA_STATE_SEQ_FLAGS_MERGE 8
+
     typedef uint32_t llama_state_seq_flags;
 
     LLAMA_API size_t llama_state_seq_get_size_ext(
