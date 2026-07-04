@@ -46,6 +46,7 @@ enum ggml_rpc_p2p_cmd {
     GGML_RPC_P2P_CMD_SET_HIDDEN_STATE = 17,  // predecessor -> device: pre-norm hidden state (fire-and-forget)
     GGML_RPC_P2P_CMD_RETURN_TOKEN     = 18,  // tail -> head: sampled token id (fire-and-forget)
     GGML_RPC_P2P_CMD_SET_PREFILL_DATA = 19,  // prefill node -> decoder node: serialized KV slice (handoff)
+    GGML_RPC_P2P_CMD_SET_DECODE_RESULT = 20, // decoder node -> prefill origin: decode result push (Case 3, fire-and-forget)
 };
 
 // Handler invoked on the SERVER for any P2P command. `in`/`in_len` is the payload (client_id already
