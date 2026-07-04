@@ -8,10 +8,31 @@
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <map>
 #include <stdexcept>
+
+// ABLATION GATE for the SWA state save/load fix. Env var SWA_STATE_FIX lists which fixes are ON:
+//   unset            -> ALL fixes OFF = stock behavior (default)
+//   SWA_STATE_FIX=123 -> all three fixes ON (fully fixed)
+//   SWA_STATE_FIX=13 -> FIX1 + FIX3 ON, FIX2 OFF
+//   SWA_STATE_FIX=1  -> only FIX1
+//   SWA_STATE_FIX=none (or any value with no '1'/'2'/'3') -> ALL OFF = stock behavior
+// getenv is read once (static) so this stays cheap on the state read/write paths.
+static bool swa_state_fix_on(char which) {
+    static const char * e = std::getenv("SWA_STATE_FIX");
+    if (!e) {
+        return false;  // var unset => all fixes OFF (stock behavior by default)
+    }
+    for (const char * p = e; *p; ++p) {
+        if (*p == which) {
+            return true;
+        }
+    }
+    return false;
+}
 
 static bool ggml_is_power_of_2(int n) {
     return (n & (n - 1)) == 0;
@@ -1998,7 +2019,12 @@ void llama_kv_cache::state_write(llama_io_write_i & io, llama_seq_id seq_id, lla
             add_cell = add_cell && (seq_id == -1 || cells.seq_has(i, seq_id));
 
             // check the cell is not SWA-masked
-            if (add_cell && seq_id != -1) {
+            // FIX 1 (gate '1'): do NOT SWA-mask a per-seq dump. Exact continuation after reload
+            // needs the FULL resident ring, not just the last n_swa cells. When FIX1 is ON we skip
+            // masking for SWA models (is_masked_swa is already a no-op when swa_type == NONE); when
+            // OFF we fall back to the stock behavior (mask to n_swa).
+            const bool fix1_skip_mask = swa_state_fix_on('1') && swa_type != LLAMA_SWA_TYPE_NONE;
+            if (add_cell && seq_id != -1 && !fix1_skip_mask) {
                 const bool is_masked = llama_hparams::is_masked_swa(n_swa, swa_type, cells.pos_get(i), cells.seq_pos_max(seq_id));
 
                 add_cell = !is_masked;
@@ -2260,15 +2286,36 @@ bool llama_kv_cache::state_read_meta(llama_io_read_i & io, uint32_t strm, uint32
             ubatch.seq_id[i]   = &dest_seq_id;
         }
 
-        sinfo = find_slot(ubatch, false);
-        if (sinfo.empty()) {
-            LLAMA_LOG_ERROR("%s: failed to find %d available cells in kv cache\n", __func__,  cell_count);
-            return false;
-        }
+        // FIX 2 (gate '2'): an SWA sub-cache is a rolling RING BUFFER (physical cell = pos%size,
+        // head = (max+1)%size). find_slot() drops cells into arbitrary evictable slots and resets
+        // the head from the cache's fill history, so it does NOT reproduce the geometry a live
+        // decode builds. When ON, place each SWA cell DIRECTLY at pos%size and set the ring head.
+        // (Only matters once the ring wraps, i.e. seq length > size; below that find_slot happens
+        // to coincide.) When OFF, or for base (full-attention), use the stock find_slot path.
+        if (swa_state_fix_on('2') && swa_type != LLAMA_SWA_TYPE_NONE) {
+            const uint32_t size = cells.size();
+            sinfo.s0 = strm; sinfo.s1 = strm;
+            sinfo.resize(1);
+            sinfo.strm[0] = strm;
+            sinfo.idxs[0].resize(cell_count);
+            llama_pos max_pos = -1;
+            for (uint32_t i = 0; i < cell_count; ++i) {
+                sinfo.idxs[0][i] = (uint32_t) (ubatch.pos[i] % (llama_pos) size);
+                if (ubatch.pos[i] > max_pos) max_pos = ubatch.pos[i];
+            }
+            apply_ubatch(sinfo, ubatch);
+            v_heads[strm] = (uint32_t) ((max_pos + 1) % (llama_pos) size);
+        } else {
+            sinfo = find_slot(ubatch, false);
+            if (sinfo.empty()) {
+                LLAMA_LOG_ERROR("%s: failed to find %d available cells in kv cache\n", __func__,  cell_count);
+                return false;
+            }
 
-        // TODO: we cannot yet restore llama_kv_cell_ext as the apply_ubatch() does not support it yet
-        //       see: https://github.com/ggml-org/llama.cpp/pull/16825#issuecomment-3460868350
-        apply_ubatch(sinfo, ubatch);
+            // TODO: we cannot yet restore llama_kv_cell_ext as the apply_ubatch() does not support it yet
+            //       see: https://github.com/ggml-org/llama.cpp/pull/16825#issuecomment-3460868350
+            apply_ubatch(sinfo, ubatch);
+        }
 
         LLAMA_LOG_DEBUG("%s: cell_count = %d, dest_seq_id = %d\n", __func__, cell_count, dest_seq_id);
 
@@ -2290,6 +2337,23 @@ bool llama_kv_cache::state_read_meta(llama_io_read_i & io, uint32_t strm, uint32
 
         clear(true);
 
+        // FIX 3 (gate '3'): an SWA sub-cache is a rolling RING BUFFER (physical cell = pos%size,
+        // head = (max+1)%size). The stock whole-cache restore placed cells CONTIGUOUSLY (slot i)
+        // with head = 0, which does not match the geometry a live decode builds -> the restored
+        // SWA window mis-attends and a full-state save/load of a seq longer than n_swa diverges.
+        // When ON, place each SWA cell at its ring slot and set the ring head; when OFF (or base
+        // full-attention), keep the stock contiguous placement (slot = i, head = 0).
+        const bool     is_swa = swa_state_fix_on('3') && swa_type != LLAMA_SWA_TYPE_NONE;
+        const uint32_t size   = cells.size();
+
+        sinfo.s0 = strm;
+        sinfo.s1 = strm;
+        sinfo.resize(1);
+        sinfo.strm[0] = strm;
+        sinfo.idxs[0].resize(cell_count);
+
+        llama_pos max_pos = -1;
+
         for (uint32_t i = 0; i < cell_count; ++i) {
             llama_pos pos;
             uint32_t  n_seq_id;
@@ -2297,12 +2361,14 @@ bool llama_kv_cache::state_read_meta(llama_io_read_i & io, uint32_t strm, uint32
             io.read(&pos,      sizeof(pos));
             io.read(&n_seq_id, sizeof(n_seq_id));
 
-            cells.pos_set(i, pos);
+            const uint32_t slot = is_swa ? (uint32_t) (pos % (llama_pos) size) : i;
+
+            cells.pos_set(slot, pos);
 
             if (hparams.n_pos_per_embd() > 1) {
                 llama_kv_cell_ext ext;
                 io.read(&ext, sizeof(ext));
-                cells.ext_set(i, ext);
+                cells.ext_set(slot, ext);
             }
 
             for (uint32_t j = 0; j < n_seq_id; ++j) {
@@ -2314,21 +2380,15 @@ bool llama_kv_cache::state_read_meta(llama_io_read_i & io, uint32_t strm, uint32
                     return false;
                 }
 
-                cells.seq_add(i, seq_id);
+                cells.seq_add(slot, seq_id);
             }
+
+            sinfo.idxs[0][i] = slot;
+
+            if (pos > max_pos) max_pos = pos;
         }
 
-        // Create contiguous slot_info for whole cache restore
-        sinfo.s0 = strm;
-        sinfo.s1 = strm;
-        sinfo.resize(1);
-        sinfo.strm[0] = strm;
-        sinfo.idxs[0].resize(cell_count);
-        for (uint32_t i = 0; i < cell_count; ++i) {
-            sinfo.idxs[0][i] = i;
-        }
-
-        head = 0;
+        head = is_swa ? (uint32_t) ((max_pos + 1) % (llama_pos) size) : 0;
     }
 
     return true;
