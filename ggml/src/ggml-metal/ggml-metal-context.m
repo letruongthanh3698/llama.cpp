@@ -272,6 +272,11 @@ static struct ggml_metal_buffer_id ggml_metal_get_buffer_id(const struct ggml_te
 }
 
 void ggml_metal_set_tensor_async(ggml_metal_t ctx, struct ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
+    // Metal's newBufferWithBytes returns nil for length 0, which trips the assert below.
+    // A zero-size set_tensor is a no-op on CUDA (cudaMemcpyAsync with size 0), so match that.
+    if (size == 0) {
+        return;
+    }
     @autoreleasepool {
         // wrap the source data into a Metal buffer
         id<MTLBuffer> buf_src = [ctx->device newBufferWithBytes:data
