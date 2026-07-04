@@ -2008,14 +2008,15 @@ void llama_kv_cache::state_write(llama_io_write_i & io, llama_seq_id seq_id, lla
             add_cell = add_cell && (seq_id == -1 || cells.seq_has(i, seq_id));
 
             // check the cell is not SWA-masked
-            // P2P Case-3 DELTA on an SWA sub-cache ships the NEW cells UNMASKED (skip this mask): the
-            // n_swa (128) window mask is EMPIRICALLY INSUFFICIENT — truncating to it drops cells the
-            // receiver's later attention needs (masked => logit drift; unmasked => bit-exact). The
-            // receiver reconstructs the ring buffer from these actual new positions (see state_read_meta).
-            const bool delta   = (flags & LLAMA_STATE_SEQ_FLAGS_DELTA) != 0;
-            const bool is_swa  = swa_type != LLAMA_SWA_TYPE_NONE;
-            const bool delta_swa = delta && is_swa;
-            if (add_cell && seq_id != -1 && !delta_swa) {
+            // PRIMITIVE FIX: never SWA-mask a per-seq dump — ship the FULL resident window. The n_swa
+            // (128) window mask is EMPIRICALLY INSUFFICIENT: truncating to it drops cells the receiver's
+            // later attention still needs (masked => logit drift / save-load-state diverges once the seq
+            // exceeds n_swa; full window => bit-exact). The receiver reconstructs the ring buffer from the
+            // actual positions (see state_read_meta). Base/full-attention is unaffected (is_masked_swa is a
+            // no-op when swa_type == NONE). This also covers the P2P Case-3 DELTA dump (was !delta_swa).
+            const bool delta  = (flags & LLAMA_STATE_SEQ_FLAGS_DELTA) != 0;
+            const bool is_swa = swa_type != LLAMA_SWA_TYPE_NONE;
+            if (add_cell && seq_id != -1 && !is_swa) {
                 const bool is_masked = llama_hparams::is_masked_swa(n_swa, swa_type, cells.pos_get(i), cells.seq_pos_max(seq_id));
 
                 add_cell = !is_masked;
@@ -2491,6 +2492,23 @@ bool llama_kv_cache::state_read_meta(llama_io_read_i & io, uint32_t strm, uint32
 
         clear(true);
 
+        // PRIMITIVE FIX: an SWA sub-cache is a rolling RING BUFFER (physical cell = pos % size, head =
+        // (max+1) % size). The stock whole-cache restore placed cells CONTIGUOUSLY (slot i) with head = 0,
+        // which does NOT match the ring geometry a live decode builds -> the restored SWA window mis-attends
+        // and a full-state save/load of a seq longer than n_swa diverges. Place each SWA cell at its ring
+        // slot and set the ring head; base (full-attention) keeps the stock contiguous placement, so its
+        // bytes/behavior are unchanged (this mirrors the per-seq SWA load above).
+        const bool     is_swa = swa_type != LLAMA_SWA_TYPE_NONE;
+        const uint32_t size   = cells.size();
+
+        sinfo.s0 = strm;
+        sinfo.s1 = strm;
+        sinfo.resize(1);
+        sinfo.strm[0] = strm;
+        sinfo.idxs[0].resize(cell_count);
+
+        llama_pos max_pos = -1;
+
         for (uint32_t i = 0; i < cell_count; ++i) {
             llama_pos pos;
             uint32_t  n_seq_id;
@@ -2498,12 +2516,14 @@ bool llama_kv_cache::state_read_meta(llama_io_read_i & io, uint32_t strm, uint32
             io.read(&pos,      sizeof(pos));
             io.read(&n_seq_id, sizeof(n_seq_id));
 
-            cells.pos_set(i, pos);
+            const uint32_t slot = is_swa ? (uint32_t) (pos % (llama_pos) size) : i;
+
+            cells.pos_set(slot, pos);
 
             if (hparams.n_pos_per_embd() > 1) {
                 llama_kv_cell_ext ext;
                 io.read(&ext, sizeof(ext));
-                cells.ext_set(i, ext);
+                cells.ext_set(slot, ext);
             }
 
             for (uint32_t j = 0; j < n_seq_id; ++j) {
@@ -2515,21 +2535,15 @@ bool llama_kv_cache::state_read_meta(llama_io_read_i & io, uint32_t strm, uint32
                     return false;
                 }
 
-                cells.seq_add(i, seq_id);
+                cells.seq_add(slot, seq_id);
             }
+
+            sinfo.idxs[0][i] = slot;
+
+            if (pos > max_pos) max_pos = pos;
         }
 
-        // Create contiguous slot_info for whole cache restore
-        sinfo.s0 = strm;
-        sinfo.s1 = strm;
-        sinfo.resize(1);
-        sinfo.strm[0] = strm;
-        sinfo.idxs[0].resize(cell_count);
-        for (uint32_t i = 0; i < cell_count; ++i) {
-            sinfo.idxs[0][i] = i;
-        }
-
-        head = 0;
+        head = is_swa ? (uint32_t) ((max_pos + 1) % (llama_pos) size) : 0;
     }
 
     return true;
