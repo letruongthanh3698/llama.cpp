@@ -319,6 +319,11 @@ void ggml_metal_set_tensor_async(ggml_metal_t ctx, struct ggml_tensor * tensor, 
 }
 
 void ggml_metal_get_tensor_async(ggml_metal_t ctx, const struct ggml_tensor * tensor, void * data, size_t offset, size_t size) {
+    // Metal's newBufferWithBytesNoCopy returns nil for length 0, which trips the assert below.
+    // A zero-size get_tensor is a no-op on CUDA (cudaMemcpyAsync with size 0), so match that.
+    if (size == 0) {
+        return;
+    }
     @autoreleasepool {
         id<MTLBuffer> buf_dst = [ctx->device newBufferWithBytesNoCopy:data
                                                                length:size
