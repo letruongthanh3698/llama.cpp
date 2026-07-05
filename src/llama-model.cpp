@@ -1233,6 +1233,33 @@ void llama_model_base::load_hparams(llama_model_loader & ml) {
         if (n_slice > 0 && n_slice < hparams.n_layer()) {
             hparams.p2p_n_layer_full = hparams.n_layer_all;                 // remember the full count
             hparams.n_layer_all      = n_slice + hparams.n_layer_nextn;     // => n_layer() == n_slice
+            // P2P slice: OFFSET the per-layer hparams arrays left by `s` so the compact local index il
+            // maps to the GLOBAL layer start+il. The graph builders index these by local il (0..n_slice),
+            // but the values were read/derived at GLOBAL indices before this resize. Critically, is_swa is
+            // PERIODIC (gpt-oss = SWA on odd layers, period 2): without this shift a slice starting at an
+            // ODD layer gets its SWA/dense phase FLIPPED — the forward stays ~correct for short prompts
+            // (window covers the whole prompt) but the PERSISTED KV lands in the wrong base/SWA sub-cache,
+            // which garbles a downstream device that reconstructs from it (D15 root cause). Uniform arrays
+            // (n_head_arr, n_ff_arr on gpt-oss) are unchanged by the shift; non-uniform models now correct.
+            if (s > 0) {
+                auto shift = [&](std::array<uint32_t, LLAMA_MAX_LAYERS> & a) {
+                    for (uint32_t i = 0; i < n_slice; ++i) a[i] = a[s + i];
+                };
+                auto shiftf = [&](std::array<float, LLAMA_MAX_LAYERS> & a) {
+                    for (uint32_t i = 0; i < n_slice; ++i) a[i] = a[s + i];
+                };
+                shift(hparams.is_swa_impl);
+                shift(hparams.is_recr_impl);
+                shift(hparams.n_head_arr);
+                shift(hparams.n_head_kv_arr);
+                shift(hparams.n_ff_arr);
+                shiftf(hparams.xielu_alpha_n);
+                shiftf(hparams.xielu_alpha_p);
+                shiftf(hparams.xielu_beta);
+                shiftf(hparams.xielu_eps);
+                shiftf(hparams.swiglu_clamp_exp);
+                shiftf(hparams.swiglu_clamp_shexp);
+            }
             LLAMA_LOG_INFO("%s: P2P partition: this device holds layers [%u, %u) of %u (n_layer now %u)\n",
                     __func__, s, e, hparams.p2p_n_layer_full, hparams.n_layer());
         }
