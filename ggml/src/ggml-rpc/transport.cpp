@@ -572,6 +572,16 @@ static bool is_valid_fd(sockfd_t sockfd) {
 #endif
 }
 
+// P2P FIX: portable close for the raw fd. Needed because socket_t::connect()/create_server() build the
+// fd BEFORE the owning socket_t exists, so their early-return paths must close it by hand or leak it.
+static void close_fd(sockfd_t sockfd) {
+#ifdef _WIN32
+    if (sockfd != INVALID_SOCKET) closesocket(sockfd);
+#else
+    if (sockfd >= 0) close(sockfd);
+#endif
+}
+
 static bool set_no_delay(sockfd_t sockfd) {
     int flag = 1;
     // set TCP_NODELAY to disable Nagle's algorithm
@@ -602,12 +612,15 @@ socket_ptr socket_t::create_server(const char * host, int port) {
     if (!is_valid_fd(sockfd)) {
         return nullptr;
     }
+    // P2P FIX: same fd leak as socket_t::connect() -- close sockfd on every failure path.
     if (!set_reuse_addr(sockfd)) {
         GGML_LOG_ERROR("Failed to set SO_REUSEADDR\n");
+        close_fd(sockfd);
         return nullptr;
     }
     if (inet_addr(host) == INADDR_NONE) {
         GGML_LOG_ERROR("Invalid host address: %s\n", host);
+        close_fd(sockfd);
         return nullptr;
     }
     struct sockaddr_in serv_addr;
@@ -616,9 +629,13 @@ socket_ptr socket_t::create_server(const char * host, int port) {
     serv_addr.sin_port = htons(port);
 
     if (bind(sockfd, (struct sockaddr *) &serv_addr, sizeof(serv_addr)) < 0) {
+        close_fd(sockfd);
         return nullptr;
     }
-    if (listen(sockfd, 1) < 0) {
+    // P2P: backlog was 1 -- too small when several ring peers connect at once (ring predecessor +
+    // prefill handoff + balancer probes). A rejected SYN turns into another failed connect() upstream.
+    if (listen(sockfd, SOMAXCONN) < 0) {
+        close_fd(sockfd);
         return nullptr;
     }
     return socket_ptr(new socket_t(std::make_unique<impl>(sockfd)));
@@ -629,8 +646,16 @@ socket_ptr socket_t::connect(const char * host, int port) {
     if (!is_valid_fd(sockfd)) {
         return nullptr;
     }
+    // P2P FIX: every failure path below MUST close sockfd. The socket_t (whose ~impl closes the fd) is
+    // only constructed on success, so an early `return nullptr` used to LEAK the descriptor. Callers
+    // retry connect() in a loop (AppLLM::waitForPeer polls a peer that is still loading its model, at
+    // 5 attempts/s), so the leak accumulates: on macOS the default RLIMIT_NOFILE is 256, which is
+    // exhausted after ~254 failed attempts (~51 s) -- after that socket() returns EMFILE and the process
+    // can NEVER connect again, even once the peer comes up. Symptom: a ring node waits forever on a peer
+    // that is demonstrably listening and reachable. Linux hosts hid this (limit 500000).
     if (!set_no_delay(sockfd)) {
         GGML_LOG_ERROR("Failed to set TCP_NODELAY\n");
+        close_fd(sockfd);
         return nullptr;
     }
     struct sockaddr_in addr;
@@ -639,10 +664,15 @@ socket_ptr socket_t::connect(const char * host, int port) {
     struct hostent * server = gethostbyname(host);
     if (server == NULL) {
         GGML_LOG_ERROR("Cannot resolve host '%s'\n", host);
+        close_fd(sockfd);
         return nullptr;
     }
     memcpy(&addr.sin_addr.s_addr, server->h_addr, server->h_length);
     if (::connect(sockfd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        // P2P: a SILENT connect failure here cost hours of debugging (a ring node waited forever on a
+        // peer that was demonstrably listening). Always say why.
+        GGML_LOG_ERROR("connect(%s:%d) failed: errno=%d (%s)\n", host, port, errno, strerror(errno));
+        close_fd(sockfd);
         return nullptr;
     }
     return socket_ptr(new socket_t(std::make_unique<impl>(sockfd)));
