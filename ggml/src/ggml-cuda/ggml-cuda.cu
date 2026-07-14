@@ -3986,10 +3986,54 @@ static bool ggml_cuda_graph_set_enabled(ggml_backend_cuda_context * cuda_ctx, co
 }
 #endif // USE_CUDA_GRAPH
 
+// [P2P] GGML_CUDA_GRAPH_TIME=1 -- report the PURE GPU time of every graph launch, measured with CUDA events
+// ON THE STREAM, next to the host-side wall clock the caller sees. This is the ONE measurement that says
+// whether a slow decode is the GPU running slower or the CPU failing to keep it fed: the wall clock of
+// llama_decode()+llama_synchronize() contains BOTH the GPU work and every host-side launch gap, and they are
+// indistinguishable from outside. Zero cost unless the env var is set.
+// The elapsed time of launch N is read at the START of launch N+1 -- by then the caller has synchronized, so
+// the events are complete and no extra sync is introduced by the measurement itself.
+struct p2p_cuda_gpu_timer {
+    cudaEvent_t ev0 = nullptr, ev1 = nullptr;
+    bool    pending = false;
+    double  sum_ms  = 0.0;      // cumulative
+    int64_t n       = 0;
+    double  win_ms  = 0.0;      // last-100 window (the cumulative mean cannot show drift)
+    int64_t win_n   = 0;
+};
+static std::mutex p2p_cuda_timer_mtx;
+static std::map<const void *, p2p_cuda_gpu_timer> p2p_cuda_timers;
+
 static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend, ggml_cgraph * cgraph) {
     ggml_backend_cuda_context * cuda_ctx = (ggml_backend_cuda_context *) backend->context;
 
     ggml_cuda_set_device(cuda_ctx->device);
+
+    static const bool p2p_gpu_time = getenv("GGML_CUDA_GRAPH_TIME") != nullptr;
+    p2p_cuda_gpu_timer * p2p_tm = nullptr;
+    if (p2p_gpu_time) {
+        std::lock_guard<std::mutex> lk(p2p_cuda_timer_mtx);
+        p2p_tm = &p2p_cuda_timers[(const void *) cuda_ctx];
+        if (!p2p_tm->ev0) {
+            CUDA_CHECK(cudaEventCreate(&p2p_tm->ev0));
+            CUDA_CHECK(cudaEventCreate(&p2p_tm->ev1));
+        }
+        if (p2p_tm->pending) {                       // previous launch: host has synchronized since
+            float ms = 0.0f;
+            CUDA_CHECK(cudaEventElapsedTime(&ms, p2p_tm->ev0, p2p_tm->ev1));
+            p2p_tm->sum_ms += ms; p2p_tm->n++;
+            p2p_tm->win_ms += ms; p2p_tm->win_n++;
+            p2p_tm->pending = false;
+            if (p2p_tm->win_n == 100) {
+                fprintf(stderr, "[CUDA-GPU-TIME] ctx=%p  GPU %8.1f us/graph (last 100)  |  %8.1f us (mean of %lld)\n",
+                        (const void *) cuda_ctx, 1000.0 * p2p_tm->win_ms / p2p_tm->win_n,
+                        1000.0 * p2p_tm->sum_ms / p2p_tm->n, (long long) p2p_tm->n);
+                fflush(stderr);
+                p2p_tm->win_ms = 0.0; p2p_tm->win_n = 0;
+            }
+        }
+        CUDA_CHECK(cudaEventRecord(p2p_tm->ev0, cuda_ctx->stream()));   // BEFORE any stream capture begins
+    }
 
     bool use_cuda_graph             = false;
     bool cuda_graph_update_required = false;
@@ -4041,6 +4085,12 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend, 
     }
 
     ggml_cuda_graph_evaluate_and_capture(cuda_ctx, cgraph, use_cuda_graph, cuda_graph_update_required, graph_key);
+
+    if (p2p_gpu_time && p2p_tm) {                    // AFTER the capture ended and the graph was launched
+        std::lock_guard<std::mutex> lk(p2p_cuda_timer_mtx);
+        CUDA_CHECK(cudaEventRecord(p2p_tm->ev1, cuda_ctx->stream()));
+        p2p_tm->pending = true;
+    }
 
     return GGML_STATUS_SUCCESS;
 }
