@@ -4000,6 +4000,8 @@ struct p2p_cuda_gpu_timer {
     int64_t n       = 0;
     double  win_ms  = 0.0;      // last-100 window (the cumulative mean cannot show drift)
     int64_t win_n   = 0;
+    int64_t win_cg  = 0;        // of those, how many actually RAN AS A CUDA GRAPH
+    bool    cg_prev = false;    // was the launch we are about to time a graph launch?
 };
 static std::mutex p2p_cuda_timer_mtx;
 static std::map<const void *, p2p_cuda_gpu_timer> p2p_cuda_timers;
@@ -4023,13 +4025,18 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend, 
             CUDA_CHECK(cudaEventElapsedTime(&ms, p2p_tm->ev0, p2p_tm->ev1));
             p2p_tm->sum_ms += ms; p2p_tm->n++;
             p2p_tm->win_ms += ms; p2p_tm->win_n++;
+            if (p2p_tm->cg_prev) p2p_tm->win_cg++;
             p2p_tm->pending = false;
             if (p2p_tm->win_n == 100) {
-                fprintf(stderr, "[CUDA-GPU-TIME] ctx=%p  GPU %8.1f us/graph (last 100)  |  %8.1f us (mean of %lld)\n",
+                // cuda_graph% is the point: the ev0..ev1 window includes the GAPS BETWEEN KERNELS on the
+                // stream, so a launch that did NOT run as a CUDA graph reads as "slow GPU" even though the
+                // kernels themselves are unchanged. Without this counter the two are indistinguishable.
+                fprintf(stderr, "[CUDA-GPU-TIME] ctx=%p  GPU %8.1f us/graph (last 100)  |  cuda_graph %3lld%%  |  %8.1f us (mean of %lld)\n",
                         (const void *) cuda_ctx, 1000.0 * p2p_tm->win_ms / p2p_tm->win_n,
+                        (long long) p2p_tm->win_cg,
                         1000.0 * p2p_tm->sum_ms / p2p_tm->n, (long long) p2p_tm->n);
                 fflush(stderr);
-                p2p_tm->win_ms = 0.0; p2p_tm->win_n = 0;
+                p2p_tm->win_ms = 0.0; p2p_tm->win_n = 0; p2p_tm->win_cg = 0;
             }
         }
         CUDA_CHECK(cudaEventRecord(p2p_tm->ev0, cuda_ctx->stream()));   // BEFORE any stream capture begins
@@ -4090,6 +4097,7 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend, 
         std::lock_guard<std::mutex> lk(p2p_cuda_timer_mtx);
         CUDA_CHECK(cudaEventRecord(p2p_tm->ev1, cuda_ctx->stream()));
         p2p_tm->pending = true;
+        p2p_tm->cg_prev = use_cuda_graph;            // did THIS launch run as a CUDA graph?
     }
 
     return GGML_STATUS_SUCCESS;
