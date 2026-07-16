@@ -11,6 +11,8 @@
 
 #import <Metal/Metal.h>
 
+#import <stdatomic.h>   // GGML_METAL_GRAPH_TIME: completion handlers accumulate from Metal's own threads
+
 #undef MIN
 #undef MAX
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
@@ -79,6 +81,19 @@ struct ggml_metal {
     // error state - set when a command buffer fails during synchronize
     // once set, graph_compute will return GGML_STATUS_FAILED until the backend is recreated
     bool has_error;
+
+    // GGML_METAL_GRAPH_TIME=1: pure GPU time per graph. Metal's graph_compute is ASYNCHRONOUS (it commits
+    // and returns; only ggml_metal_synchronize waits), so wall-clock around llama_decode does NOT measure
+    // the GPU -- a caller that syncs and one that does not are timing different things. MTLCommandBuffer
+    // reports the true on-GPU window (GPUStartTime/GPUEndTime), read in a completion handler, so this costs
+    // no extra synchronization. Buffers on a queue do not overlap, so per-graph GPU time = SUM over its
+    // command buffers. Zero cost when unset.
+    bool     gpu_time;
+    _Atomic  double  gpu_time_us;     // accumulated GPU busy time
+    _Atomic  int64_t gpu_time_bufs;   // command buffers accounted for
+    int64_t  gpu_time_graphs;         // graphs submitted (main thread only)
+    double   gpu_time_us_prev;
+    int64_t  gpu_time_graphs_prev;
 };
 
 ggml_metal_t ggml_metal_init(ggml_metal_device_t dev) {
@@ -170,6 +185,19 @@ ggml_metal_t ggml_metal_init(ggml_metal_device_t dev) {
     }
 
     res->has_error = false;
+
+    // GGML_METAL_GRAPH_TIME=1 -> report pure on-GPU time per graph (see the struct comment).
+    res->gpu_time = getenv("GGML_METAL_GRAPH_TIME") != NULL && atoi(getenv("GGML_METAL_GRAPH_TIME")) != 0;
+    atomic_store(&res->gpu_time_us,   0.0);
+    atomic_store(&res->gpu_time_bufs, 0);
+    res->gpu_time_graphs      = 0;
+    res->gpu_time_us_prev     = 0.0;
+    res->gpu_time_graphs_prev = 0;
+    if (res->gpu_time) {
+        // stderr, not GGML_LOG_INFO: INFO is filtered out below -v, and the P2P ring's Decoder_main runs at
+        // a level that drops it entirely -- which is exactly the process this hook exists to measure.
+        fprintf(stderr, "%s: GGML_METAL_GRAPH_TIME=1 -- reporting pure GPU time per graph\n", __func__);
+    }
 
     res->gf = nil;
     res->encode_async = nil;
@@ -435,6 +463,57 @@ bool ggml_metal_cpy_tensor_async(ggml_metal_t ctx_src, ggml_metal_t ctx_dst, con
     }
 }
 
+// GGML_METAL_GRAPH_TIME=1 -- accumulate this command buffer's PURE GPU time.
+//
+// Why this exists: ggml_metal_graph_compute is ASYNCHRONOUS -- it enqueues/commits and returns, and only
+// ggml_metal_synchronize waits (see the "we leave the graph to compute asynchronously" comment below). So
+// wall-clock measured around llama_decode means different things to different callers: one that calls
+// llama_synchronize (the isolated bench) contains the GPU work, one that does not (the P2P ring's
+// ring_loop_body, which times only llama_decode) may not. Comparing those two numbers is invalid, and the
+// difference is invisible without a direct GPU measurement -- which is what this provides.
+//
+// MTLCommandBuffer exposes the true on-GPU window (GPUStartTime/GPUEndTime, seconds) once the buffer
+// completes. Reading it from a completion handler costs NO extra synchronization. Command buffers on one
+// queue do not overlap, so a graph's GPU time is the SUM over its buffers.
+static void ggml_metal_gpu_time_track(ggml_metal_t ctx, id<MTLCommandBuffer> cmd_buf) {
+    if (!ctx->gpu_time) {
+        return;
+    }
+
+    __block ggml_metal_t ctx_b = ctx;
+    [cmd_buf addCompletedHandler:^(id<MTLCommandBuffer> cb) {
+        const double us = ([cb GPUEndTime] - [cb GPUStartTime]) * 1e6;
+        if (us > 0.0) {   // 0 when the buffer encoded no GPU work
+            atomic_fetch_add(&ctx_b->gpu_time_us,   us);
+            atomic_fetch_add(&ctx_b->gpu_time_bufs, 1);
+        }
+    }];
+}
+
+// Report every 100 graphs, as a WINDOWED mean over the last 100 (a cumulative mean cannot show a mid-run
+// change -- it buries exactly the drift we are looking for).
+static void ggml_metal_gpu_time_report(ggml_metal_t ctx) {
+    if (!ctx->gpu_time || ++ctx->gpu_time_graphs % 100 != 0) {
+        return;
+    }
+
+    const double  us_now = atomic_load(&ctx->gpu_time_us);
+    const int64_t n_now  = ctx->gpu_time_graphs;
+
+    const double  d_us = us_now - ctx->gpu_time_us_prev;
+    const int64_t d_n  = n_now  - ctx->gpu_time_graphs_prev;
+
+    // The handlers of the last few graphs may not have fired yet, so this window's denominator is exact but
+    // its numerator can lag by a graph or two; over 100 graphs that is <2%.
+    fprintf(stderr, "[METAL-GPU-TIME] ctx=%p GPU %.1f us/graph (last %lld) | %.1f us (mean of %lld) | bufs %lld\n",
+            (void *) ctx, d_n > 0 ? d_us / (double) d_n : 0.0, (long long) d_n,
+            n_now > 0 ? us_now / (double) n_now : 0.0, (long long) n_now,
+            (long long) atomic_load(&ctx->gpu_time_bufs));
+
+    ctx->gpu_time_us_prev     = us_now;
+    ctx->gpu_time_graphs_prev = n_now;
+}
+
 enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph * gf) {
     if (ctx->has_error) {
         GGML_LOG_ERROR("%s: backend is in error state from a previous command buffer failure - recreate the backend to recover\n", __func__);
@@ -517,6 +596,8 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
             }
             ctx->cmd_bufs[n_cb].obj = cmd_buf;
 
+            ggml_metal_gpu_time_track(ctx, cmd_buf);   // must precede commit (inside encode_async)
+
             [cmd_buf enqueue];
 
             ctx->encode_async(n_cb);
@@ -535,6 +616,8 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
                 [ctx->cmd_bufs[cb_idx].obj release];
             }
             ctx->cmd_bufs[cb_idx].obj = cmd_buf;
+
+            ggml_metal_gpu_time_track(ctx, cmd_buf);   // must precede commit (inside encode_async)
 
             // always enqueue the first two command buffers
             // enqueue all of the command buffers if we don't need to abort
@@ -610,6 +693,8 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
             ctx->capture_started = false;
         }
     }
+
+    ggml_metal_gpu_time_report(ctx);
 
     return GGML_STATUS_SUCCESS;
 }
