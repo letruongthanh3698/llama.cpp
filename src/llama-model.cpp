@@ -1248,7 +1248,9 @@ void llama_model_base::load_hparams(llama_model_loader & ml) {
             // P2P slice: OFFSET the per-layer hparams arrays left by `s` so the compact local index il
             // maps to the GLOBAL layer start+il. The graph builders index these by local il (0..n_slice),
             // but the values were read/derived at GLOBAL indices before this resize. Critically, is_swa is
-            // PERIODIC (gpt-oss = SWA on odd layers, period 2): without this shift a slice starting at an
+            // PERIODIC (gpt-oss = SWA on EVEN layers, dense on ODD, period 2 — verified at runtime:
+            // set_swa_pattern(2, dense_first=false) gives is_swa[il] = (il % 2 == 0), and the GGUF carries
+            // no ...sliding_window_pattern key to override it): without this shift a slice starting at an
             // ODD layer gets its SWA/dense phase FLIPPED — the forward stays ~correct for short prompts
             // (window covers the whole prompt) but the PERSISTED KV lands in the wrong base/SWA sub-cache,
             // which garbles a downstream device that reconstructs from it (D15 root cause). Uniform arrays
