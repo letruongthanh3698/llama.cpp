@@ -582,6 +582,14 @@ extern "C" {
     // A single-device full model returns true for both. Used to branch head/mid/tail behaviour.
     LLAMA_API bool    llama_model_p2p_is_head  (const struct llama_model * model);
     LLAMA_API bool    llama_model_p2p_is_tail  (const struct llama_model * model);
+    // Is LOCAL layer il of this slice a sliding-window (SWA) layer? `il` is the slice-local index
+    // (0..llama_model_n_layer), i.e. AFTER the per-layer hparams arrays were shifted by start_layer.
+    // Exposed because a slice's cost depends on its count of NON-SWA ("dense") layers: only those attend
+    // over the whole KV, so only they grow with depth (an SWA layer is pinned at n_swa forever). Any tool
+    // that proxies one slice with another MUST match that count, and the SWA layout is PER MODEL (see
+    // set_swa_pattern: dense_first inverts the phase, and the period comes from the GGUF) -- so it has to
+    // be read, never assumed.
+    LLAMA_API bool    llama_model_is_swa_layer (const struct llama_model * model, int32_t il);
     // BENCH ONLY: force the head/tail roles at runtime (any slice can act as head/mid/tail; FLOP is
     // weight-independent). Lets one loaded slice be timed as embed+blocks / blocks / blocks+finals.
     LLAMA_API void    llama_model_set_p2p_role (struct llama_model * model, bool is_head, bool is_tail);

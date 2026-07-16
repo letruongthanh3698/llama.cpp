@@ -2451,6 +2451,13 @@ bool llama_model_p2p_is_tail(const llama_model * model) {
     return model->hparams.p2p_is_tail;
 }
 
+bool llama_model_is_swa_layer(const llama_model * model, int32_t il) {
+    if (il < 0 || (uint32_t) il >= model->hparams.n_layer()) {
+        return false;
+    }
+    return model->hparams.is_swa((uint32_t) il);
+}
+
 // Override the device roles at runtime (BENCH ONLY). tok_embd/output_norm/output are always loaded,
 // so any slice can be forced to act as head (apply embed), mid (neither) or tail (apply norm+lm_head)
 // without loading a different slice — the FLOP is weight-independent, so the timing is representative.
