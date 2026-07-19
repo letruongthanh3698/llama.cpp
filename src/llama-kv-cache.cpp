@@ -1,3 +1,4 @@
+#include <unordered_map>
 #include "llama-kv-cache.h"
 
 #include "llama-impl.h"
@@ -2359,9 +2360,21 @@ bool llama_kv_cache::state_read_meta(llama_io_read_i & io, uint32_t strm, uint32
             LLAMA_LOG_ERROR("%s: merge cell-count mismatch (have %zu, dump %u)\n", __func__, existing.size(), cell_count);
             return false;
         }
-        std::sort(existing.begin(), existing.end(),
-                  [&](uint32_t a, uint32_t b) { return cells.pos_get(a) < cells.pos_get(b); });   // pos-ascending == dump order
+        // MATCH BY POSITION, NEVER BY ORDER. The previous code sorted `existing` position-ascending and
+        // asserted that equals dump order. That holds for the BASE sub-cache (contiguous from 0) but is
+        // FALSE for an SWA sub-cache once its ring has wrapped: those cells are dumped in RING-SLOT order
+        // (slot = pos % ring_size), so a 768-cell window over positions [511,1278] dumps as
+        // 768,769,...,1278,511,...,767 -- first pos 768 while the lowest is 511. The merge then failed with
+        // "merge position mismatch at 0 (have 511, dump 768)", and it only passed at all when the ring
+        // happened to be unwrapped, so it failed on SOME clients and not others (2 of 4 in the P2P gate).
+        // Look each dumped position up instead, and build idxs in DUMP order so state_read_data_tagged
+        // writes each block to the cell that actually holds that position.
+        std::unordered_map<llama_pos, uint32_t> by_pos;
+        by_pos.reserve(existing.size() * 2);
+        for (uint32_t c : existing) by_pos[cells.pos_get(c)] = c;
 
+        std::vector<uint32_t> ordered;                  // existing cells, in the DUMP's order
+        ordered.reserve(cell_count);
         for (uint32_t i = 0; i < cell_count; ++i) {
             llama_pos pos;
             uint32_t  n_seq_id;
@@ -2370,17 +2383,19 @@ bool llama_kv_cache::state_read_meta(llama_io_read_i & io, uint32_t strm, uint32
             if (n_seq_id != 1) { LLAMA_LOG_ERROR("%s: invalid seq_id-agnostic kv cell (merge)\n", __func__); return false; }
             if (hparams.n_pos_per_embd() > 1) { llama_kv_cell_ext ext; io.read(&ext, sizeof(ext)); }
             { llama_seq_id sid; io.read(&sid, sizeof(sid)); }   // discard; we keep the existing cell
-            if (cells.pos_get(existing[i]) != pos) {
-                LLAMA_LOG_ERROR("%s: merge position mismatch at %u (have %d, dump %d)\n",
-                                __func__, i, cells.pos_get(existing[i]), pos);
+            const auto it = by_pos.find(pos);
+            if (it == by_pos.end()) {
+                LLAMA_LOG_ERROR("%s: merge position %d (dump cell %u) not present in the existing seq\n",
+                                __func__, pos, i);
                 return false;
             }
+            ordered.push_back(it->second);
         }
 
         sinfo.s0 = strm; sinfo.s1 = strm;
         sinfo.resize(1);
         sinfo.strm[0] = strm;
-        sinfo.idxs[0] = existing;
+        sinfo.idxs[0] = ordered;
         return true;
     }
 
