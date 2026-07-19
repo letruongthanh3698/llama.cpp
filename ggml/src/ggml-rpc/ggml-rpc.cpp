@@ -79,6 +79,7 @@ enum rpc_cmd {
     RPC_CMD_RETURN_TOKEN,                          // tail -> head: sampled token id
     RPC_CMD_SET_PREFILL_DATA,                      // prefill node -> decoder node: serialized KV slice
     RPC_CMD_SET_DECODE_RESULT,                     // decoder node -> prefill origin: decode result push (Case 3)
+    RPC_CMD_PREPARE,                               // device -> successor: advisory "prepare these clients" hint
     RPC_CMD_COUNT,
 };
 
@@ -90,6 +91,8 @@ static_assert((int) RPC_CMD_RETURN_TOKEN == (int) GGML_RPC_P2P_CMD_RETURN_TOKEN,
 static_assert((int) RPC_CMD_SET_PREFILL_DATA == (int) GGML_RPC_P2P_CMD_SET_PREFILL_DATA,
               "P2P command id must match the public ggml_rpc_p2p_cmd enum in ggml-rpc.h");
 static_assert((int) RPC_CMD_SET_DECODE_RESULT == (int) GGML_RPC_P2P_CMD_SET_DECODE_RESULT,
+              "P2P command id must match the public ggml_rpc_p2p_cmd enum in ggml-rpc.h");
+static_assert((int) RPC_CMD_PREPARE == (int) GGML_RPC_P2P_CMD_PREPARE,
               "P2P command id must match the public ggml_rpc_p2p_cmd enum in ggml-rpc.h");
 
 // Try RPC_CMD_SET_TENSOR_HASH first when data size is larger than this threshold
