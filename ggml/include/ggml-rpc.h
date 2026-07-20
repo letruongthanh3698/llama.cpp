@@ -48,6 +48,12 @@ enum ggml_rpc_p2p_cmd {
     GGML_RPC_P2P_CMD_SET_PREFILL_DATA = 19,  // prefill node -> decoder node: serialized KV slice (handoff)
     GGML_RPC_P2P_CMD_SET_DECODE_RESULT = 20, // decoder node -> prefill origin: decode result push (Case 3, fire-and-forget)
     GGML_RPC_P2P_CMD_PREPARE           = 21, // device -> successor: ADVISORY "prepare these clients" hint (fire-and-forget)
+    // --- CLIENT ENTRY POINT (Phase 11.2). The only REQUEST/RESPONSE commands: an external client
+    //     submits work and polls for it. The handler's *out/*out_len reply path carries the answer.
+    GGML_RPC_P2P_CMD_ADD_PROMPT        = 22, // client -> prefill head: submit a prompt, returns client_id
+    GGML_RPC_P2P_CMD_CHECK_PROGRESS    = 23, // client -> prefill head: poll one client's state
+    GGML_RPC_P2P_CMD_GET_RESULT_CLIENT = 24, // client -> prefill head: fetch result META (text + timings)
+    GGML_RPC_P2P_CMD_CHECK_PROGRESS_MULTI = 25, // client -> prefill head: poll MANY clients in ONE round trip
 };
 
 // Handler invoked on the SERVER for any P2P command. `in`/`in_len` is the payload (client_id already

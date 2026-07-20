@@ -80,6 +80,10 @@ enum rpc_cmd {
     RPC_CMD_SET_PREFILL_DATA,                      // prefill node -> decoder node: serialized KV slice
     RPC_CMD_SET_DECODE_RESULT,                     // decoder node -> prefill origin: decode result push (Case 3)
     RPC_CMD_PREPARE,                               // device -> successor: advisory "prepare these clients" hint
+    RPC_CMD_ADD_PROMPT,                            // client -> prefill head: submit a prompt (request/response)
+    RPC_CMD_CHECK_PROGRESS,                        // client -> prefill head: poll state (request/response)
+    RPC_CMD_GET_RESULT_CLIENT,                     // client -> prefill head: fetch result (request/response)
+    RPC_CMD_CHECK_PROGRESS_MULTI,                  // client -> prefill head: batched poll (request/response)
     RPC_CMD_COUNT,
 };
 
@@ -93,6 +97,14 @@ static_assert((int) RPC_CMD_SET_PREFILL_DATA == (int) GGML_RPC_P2P_CMD_SET_PREFI
 static_assert((int) RPC_CMD_SET_DECODE_RESULT == (int) GGML_RPC_P2P_CMD_SET_DECODE_RESULT,
               "P2P command id must match the public ggml_rpc_p2p_cmd enum in ggml-rpc.h");
 static_assert((int) RPC_CMD_PREPARE == (int) GGML_RPC_P2P_CMD_PREPARE,
+              "P2P command id must match the public ggml_rpc_p2p_cmd enum in ggml-rpc.h");
+static_assert((int) RPC_CMD_ADD_PROMPT == (int) GGML_RPC_P2P_CMD_ADD_PROMPT,
+              "P2P command id must match the public ggml_rpc_p2p_cmd enum in ggml-rpc.h");
+static_assert((int) RPC_CMD_CHECK_PROGRESS == (int) GGML_RPC_P2P_CMD_CHECK_PROGRESS,
+              "P2P command id must match the public ggml_rpc_p2p_cmd enum in ggml-rpc.h");
+static_assert((int) RPC_CMD_GET_RESULT_CLIENT == (int) GGML_RPC_P2P_CMD_GET_RESULT_CLIENT,
+              "P2P command id must match the public ggml_rpc_p2p_cmd enum in ggml-rpc.h");
+static_assert((int) RPC_CMD_CHECK_PROGRESS_MULTI == (int) GGML_RPC_P2P_CMD_CHECK_PROGRESS_MULTI,
               "P2P command id must match the public ggml_rpc_p2p_cmd enum in ggml-rpc.h");
 
 // Try RPC_CMD_SET_TENSOR_HASH first when data size is larger than this threshold
