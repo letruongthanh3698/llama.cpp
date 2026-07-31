@@ -1329,7 +1329,7 @@ void llama_model_loader::done_getting_tensors(bool partial) const {
         if (!partial) {
             throw std::runtime_error(format("%s: wrong number of tensors; expected %d, got %d", __func__, n_tensors, n_created));
         }
-        LLAMA_LOG_INFO("%s: partial load — used %d of %d tensors in the file (rest belong to a sibling model on the same .gguf)\n",
+        LLAMA_LOG_INFO("%s: partial load - used %d of %d tensors in the file (rest are outside this device's layer slice)\n",
                 __func__, n_created, n_tensors);
     }
     if (n_tensors_moved > 0) {
