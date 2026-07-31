@@ -1,5 +1,7 @@
 #include "models.h"
 
+#include <algorithm>   // std::min (BENCH: n_run cap)
+
 void llama_model_qwen2moe::load_arch_hparams(llama_model_loader & ml) {
     ml.get_key(LLM_KV_EXPERT_FEED_FORWARD_LENGTH,        hparams.n_ff_exp, false);
     ml.get_key(LLM_KV_EXPERT_SHARED_FEED_FORWARD_LENGTH, hparams.n_ff_shexp, false);
@@ -25,14 +27,18 @@ void llama_model_qwen2moe::load_arch_tensors(llama_model_loader &) {
     for (int i = 0; i < n_layer; ++i) {
         auto & layer = layers[i];
 
-        layer.attn_norm = create_tensor(tn(LLM_TENSOR_ATTN_NORM, "weight", i), {n_embd}, 0);
+        // P2P: layers[] is stored compactly for this device's slice, but the GGUF names carry the
+        // GLOBAL layer index, so tensor lookups must be by g, not i.
+        const int g = (int) hparams.p2p_global_il((uint32_t) i);
 
-        create_tensor_qkv(layer, i, n_embd, n_embd, n_embd_gqa, n_embd_gqa, 0);
-        layer.wo = create_tensor(tn(LLM_TENSOR_ATTN_OUT, "weight", i), {n_embd, n_embd}, 0);
+        layer.attn_norm = create_tensor(tn(LLM_TENSOR_ATTN_NORM, "weight", g), {n_embd}, 0);
 
-        layer.ffn_norm = create_tensor(tn(LLM_TENSOR_FFN_NORM, "weight", i), {n_embd}, 0);
+        create_tensor_qkv(layer, g, n_embd, n_embd, n_embd_gqa, n_embd_gqa, 0);
+        layer.wo = create_tensor(tn(LLM_TENSOR_ATTN_OUT, "weight", g), {n_embd, n_embd}, 0);
 
-        layer.ffn_gate_inp = create_tensor(tn(LLM_TENSOR_FFN_GATE_INP, "weight", i), {n_embd, n_expert}, 0);
+        layer.ffn_norm = create_tensor(tn(LLM_TENSOR_FFN_NORM, "weight", g), {n_embd}, 0);
+
+        layer.ffn_gate_inp = create_tensor(tn(LLM_TENSOR_FFN_GATE_INP, "weight", g), {n_embd, n_expert}, 0);
 
         if (n_expert == 0) {
             throw std::runtime_error("n_expert must be > 0 for QWEN2MOE");
@@ -44,17 +50,17 @@ void llama_model_qwen2moe::load_arch_tensors(llama_model_loader &) {
         // MoE branch
         const int64_t n_ff_exp = hparams.n_ff_exp ? hparams.n_ff_exp : n_ff / n_expert_used;
 
-        layer.ffn_gate_exps = create_tensor(tn(LLM_TENSOR_FFN_GATE_EXPS, "weight", i), {  n_embd, n_ff_exp, n_expert}, 0);
-        layer.ffn_down_exps = create_tensor(tn(LLM_TENSOR_FFN_DOWN_EXPS, "weight", i), {n_ff_exp,   n_embd, n_expert}, 0);
-        layer.ffn_up_exps   = create_tensor(tn(LLM_TENSOR_FFN_UP_EXPS,   "weight", i), {  n_embd, n_ff_exp, n_expert}, 0);
+        layer.ffn_gate_exps = create_tensor(tn(LLM_TENSOR_FFN_GATE_EXPS, "weight", g), {  n_embd, n_ff_exp, n_expert}, 0);
+        layer.ffn_down_exps = create_tensor(tn(LLM_TENSOR_FFN_DOWN_EXPS, "weight", g), {n_ff_exp,   n_embd, n_expert}, 0);
+        layer.ffn_up_exps   = create_tensor(tn(LLM_TENSOR_FFN_UP_EXPS,   "weight", g), {  n_embd, n_ff_exp, n_expert}, 0);
 
         // Shared expert branch
         const int64_t n_ff_shexp = hparams.n_ff_shexp ? hparams.n_ff_shexp : n_ff;
 
-        layer.ffn_gate_inp_shexp = create_tensor(tn(LLM_TENSOR_FFN_GATE_INP_SHEXP, "weight", i), {n_embd}, 0);
-        layer.ffn_gate_shexp = create_tensor(tn(LLM_TENSOR_FFN_GATE_SHEXP, "weight", i), {    n_embd, n_ff_shexp}, 0);
-        layer.ffn_down_shexp = create_tensor(tn(LLM_TENSOR_FFN_DOWN_SHEXP, "weight", i), {n_ff_shexp,     n_embd}, 0);
-        layer.ffn_up_shexp   = create_tensor(tn(LLM_TENSOR_FFN_UP_SHEXP,   "weight", i), {    n_embd, n_ff_shexp}, 0);
+        layer.ffn_gate_inp_shexp = create_tensor(tn(LLM_TENSOR_FFN_GATE_INP_SHEXP, "weight", g), {n_embd}, 0);
+        layer.ffn_gate_shexp = create_tensor(tn(LLM_TENSOR_FFN_GATE_SHEXP, "weight", g), {    n_embd, n_ff_shexp}, 0);
+        layer.ffn_down_shexp = create_tensor(tn(LLM_TENSOR_FFN_DOWN_SHEXP, "weight", g), {n_ff_shexp,     n_embd}, 0);
+        layer.ffn_up_shexp   = create_tensor(tn(LLM_TENSOR_FFN_UP_SHEXP,   "weight", g), {    n_embd, n_ff_shexp}, 0);
     }
 }
 
@@ -73,14 +79,26 @@ llama_model_qwen2moe::graph::graph(const llama_model & model, const llm_graph_pa
 
     inpL = build_inp_embd(model.tok_embd);
 
+    // BENCH: how many blocks to actually run (default = all loaded). 0 blocks isolates embed (head)
+    // or finals (tail) on a fully-loaded slice. Inputs used ONLY inside the block loop (positions,
+    // attention/KV) must NOT be created when n_run == 0 - an unused input stays unallocated and
+    // would fail set_input's buffer assert.
+    const int n_run = hparams.p2p_n_active_layers >= 0
+        ? std::min<int>(hparams.p2p_n_active_layers, n_layer) : n_layer;
+
     // inp_pos - contains the positions
-    ggml_tensor * inp_pos = build_inp_pos();
+    ggml_tensor * inp_pos = n_run > 0 ? build_inp_pos() : nullptr;
 
-    auto * inp_attn = build_attn_inp_kv();
+    // qwen2moe declares no SWA, so this is the plain KV input (as qwen3moe).
+    auto * inp_attn = n_run > 0 ? build_attn_inp_kv() : nullptr;
 
-    ggml_tensor * inp_out_ids = build_inp_out_ids();
+    // TAIL only: out_ids gathers the output rows before norm+lm_head. A mid/head ring device
+    // exports the full-width hidden state and never gathers, so it must NOT create this input.
+    ggml_tensor * inp_out_ids = hparams.p2p_is_tail ? build_inp_out_ids() : nullptr;
 
-    for (int il = 0; il < n_layer; ++il) {
+    // P2P: n_layer is this device's SLICE count and model.layers is stored compactly, so the stock
+    // [0, n_run) loop already computes exactly this device's slice.
+    for (int il = 0; il < n_run; ++il) {
         ggml_tensor * inpSA = inpL;
 
         // norm
@@ -115,7 +133,10 @@ llama_model_qwen2moe::graph::graph(const llama_model & model, const llm_graph_pa
                     model.layers[il].wo, model.layers[il].wo_b, model.layers[il].wo_s,
                     Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, 1.0f/sqrtf(float(n_embd_head)), il);
         }
-        if (il == n_layer - 1 && inp_out_ids) {
+        if (il == n_run - 1 && hparams.p2p_is_tail && inp_out_ids) {
+            // skip computing output for unused tokens - TAIL ONLY. A mid/head ring device must
+            // forward the FULL-width hidden state (the next device's attention needs every
+            // position), so the out_ids reduction is applied only where logits are produced.
             cur   = ggml_get_rows(ctx0,   cur, inp_out_ids);
             inpSA = ggml_get_rows(ctx0, inpSA, inp_out_ids);
         }
@@ -176,6 +197,24 @@ llama_model_qwen2moe::graph::graph(const llama_model & model, const llm_graph_pa
         inpL = cur;
     }
     cur = inpL;
+
+    // BENCH: with 0 blocks run, the in-loop out_ids gather never fired, so the tail's finals would
+    // run over EVERY input position. Gather here so the isolated "finals" measurement matches a real
+    // forward (prefill: only the last token -> 1 lm_head row).
+    if (hparams.p2p_is_tail && n_run == 0 && inp_out_ids) {
+        cur = ggml_get_rows(ctx0, cur, inp_out_ids);
+    }
+
+    if (!hparams.p2p_is_tail) {
+        // MID / HEAD ring device: export the PRE-norm hidden state and stop. The successor device
+        // consumes this as its input (via ubatch.embd). We deliberately skip output_norm + lm_head
+        // (only the tail produces logits). Stored in t_h_nextn (the slot MTP/EAGLE use), which the
+        // context copies out to the readable embd_nextn buffer when cparams.embeddings_nextn is set.
+        cb(cur, "result_h_nextn", -1);
+        res->t_h_nextn = cur;
+        ggml_build_forward_expand(gf, cur);
+        return;
+    }
 
     cur = build_norm(cur,
             model.output_norm, NULL,
