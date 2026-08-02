@@ -6,9 +6,9 @@
 extern "C" {
 #endif
 
-#define RPC_PROTO_MAJOR_VERSION    4
+#define RPC_PROTO_MAJOR_VERSION    5
 #define RPC_PROTO_MINOR_VERSION    0
-#define RPC_PROTO_PATCH_VERSION    3
+#define RPC_PROTO_PATCH_VERSION    0
 
 #ifdef  __cplusplus
 static_assert(GGML_OP_COUNT == 101, "GGML_OP_COUNT has changed - update RPC_PROTO_PATCH_VERSION");
@@ -42,18 +42,27 @@ GGML_BACKEND_API ggml_backend_reg_t ggml_backend_rpc_add_server(const char * end
 //
 // Command ids live in [GGML_RPC_P2P_CMD_BASE, RPC_CMD_COUNT) and are static_assert'd against the
 // internal rpc_cmd enum in ggml-rpc.cpp. Both peers must run the same build.
+//
+// *** THE BASE IS 32, WITH DELIBERATE HEADROOM ABOVE THE STOCK COMMANDS. DO NOT PACK IT DOWN. ***
+// The band started at 17, immediately after the last stock command. On the 2026-08-02 upstream
+// re-merge upstream added RPC_CMD_MEMSET_TENSOR at exactly 17 and the whole band collided — the
+// first conflicting re-merge in three. Renumbering the band is a WIRE-FORMAT change (every node in
+// the fleet must rebuild together), so it is not something to repeat each time upstream adds a
+// command. 32 leaves upstream 15 free ids; when it gets close, move the base again rather than
+// interleaving. The gap costs nothing: nothing is sized by RPC_CMD_COUNT, it is only compared
+// against in rpc_serve_client's range guard.
 enum ggml_rpc_p2p_cmd {
-    GGML_RPC_P2P_CMD_SET_HIDDEN_STATE = 17,  // predecessor -> device: pre-norm hidden state (fire-and-forget)
-    GGML_RPC_P2P_CMD_RETURN_TOKEN     = 18,  // tail -> head: sampled token id (fire-and-forget)
-    GGML_RPC_P2P_CMD_SET_PREFILL_DATA = 19,  // prefill node -> decoder node: serialized KV slice (handoff)
-    GGML_RPC_P2P_CMD_SET_DECODE_RESULT = 20, // decoder node -> prefill origin: decode result push (Case 3, fire-and-forget)
-    GGML_RPC_P2P_CMD_PREPARE           = 21, // device -> successor: ADVISORY "prepare these clients" hint (fire-and-forget)
+    GGML_RPC_P2P_CMD_SET_HIDDEN_STATE = 32,  // predecessor -> device: pre-norm hidden state (fire-and-forget)
+    GGML_RPC_P2P_CMD_RETURN_TOKEN     = 33,  // tail -> head: sampled token id (fire-and-forget)
+    GGML_RPC_P2P_CMD_SET_PREFILL_DATA = 34,  // prefill node -> decoder node: serialized KV slice (handoff)
+    GGML_RPC_P2P_CMD_SET_DECODE_RESULT = 35, // decoder node -> prefill origin: decode result push (Case 3, fire-and-forget)
+    GGML_RPC_P2P_CMD_PREPARE           = 36, // device -> successor: ADVISORY "prepare these clients" hint (fire-and-forget)
     // --- CLIENT ENTRY POINT (Phase 11.2). The only REQUEST/RESPONSE commands: an external client
     //     submits work and polls for it. The handler's *out/*out_len reply path carries the answer.
-    GGML_RPC_P2P_CMD_ADD_PROMPT        = 22, // client -> prefill head: submit a prompt, returns client_id
-    GGML_RPC_P2P_CMD_CHECK_PROGRESS    = 23, // client -> prefill head: poll one client's state
-    GGML_RPC_P2P_CMD_GET_RESULT_CLIENT = 24, // client -> prefill head: fetch result META (text + timings)
-    GGML_RPC_P2P_CMD_CHECK_PROGRESS_MULTI = 25, // client -> prefill head: poll MANY clients in ONE round trip
+    GGML_RPC_P2P_CMD_ADD_PROMPT        = 37, // client -> prefill head: submit a prompt, returns client_id
+    GGML_RPC_P2P_CMD_CHECK_PROGRESS    = 38, // client -> prefill head: poll one client's state
+    GGML_RPC_P2P_CMD_GET_RESULT_CLIENT = 39, // client -> prefill head: fetch result META (text + timings)
+    GGML_RPC_P2P_CMD_CHECK_PROGRESS_MULTI = 40, // client -> prefill head: poll MANY clients in ONE round trip
 };
 
 // Handler invoked on the SERVER for any P2P command. `in`/`in_len` is the payload (client_id already
