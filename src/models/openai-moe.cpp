@@ -90,6 +90,21 @@ llama_model_openai_moe::graph::graph(const llama_model & model, const llm_graph_
     // (an unused input is left unallocated and would fail set_input's buffer assert).
     ggml_tensor * inp_out_ids = hparams.p2p_is_tail ? build_inp_out_ids() : nullptr;
 
+    // WHERE the out_ids gather happens. Exactly ONE gather may run; P2P and upstream's eagle3/MTP
+    // support (f87067841) both have a stake in the placement:
+    //   - ring mid/head: NEVER gather (inp_out_ids is null above) — the successor's attention needs
+    //     every position, so the full-width hidden state must be forwarded.
+    //   - tail: gather IN-LOOP, which is what upstream did before f87067841 and what every cost
+    //     measurement in the bench corpus assumes — the last block's attention+MoE then runs over the
+    //     output rows only (1 row for prefill) instead of the whole prompt.
+    //   - EXCEPT when a consumer needs the full-width PRE-norm state: unmasked embeddings_nextn, i.e.
+    //     upstream's eagle3 draft input. Then the gather is deferred until after t_h_nextn is taken.
+    // Upstream's own gate is `masked` alone, and `masked` DEFAULTS TO FALSE (llama-context.cpp:120),
+    // so taking it verbatim would defer the gather for every stock tail forward. The `!embeddings_nextn`
+    // term restores the in-loop path for the (normal) case where nothing reads t_h_nextn at all.
+    const bool gather_in_loop = inp_out_ids &&
+        (cparams.embeddings_nextn_masked || !cparams.embeddings_nextn);
+
     // P2P: n_layer is this device's SLICE count (hparams was resized in load_hparams), and
     // model.layers is stored compactly, so the stock [0, n_layer) loop already computes exactly
     // this device's slice. (Ring note: for a mid-pipeline device the input hidden state must be
@@ -136,10 +151,8 @@ llama_model_openai_moe::graph::graph(const llama_model & model, const llm_graph_
 
             cb(cur, "attn_out", il);
         }
-        if (il == n_run - 1 && hparams.p2p_is_tail) {
-            // skip computing output for unused tokens — TAIL ONLY. A mid/head ring device must
-            // forward the FULL-width hidden state (the next device's attention needs every
-            // position), so the out_ids reduction is applied only where logits are produced.
+        if (il == n_run - 1 && gather_in_loop) {
+            // skip computing output for unused tokens (see gather_in_loop above)
             cur   = ggml_get_rows(ctx0,   cur, inp_out_ids);
             inpSA = ggml_get_rows(ctx0, inpSA, inp_out_ids);
         }
@@ -179,7 +192,7 @@ llama_model_openai_moe::graph::graph(const llama_model & model, const llm_graph_
     // BENCH: with 0 blocks run, the in-loop out_ids gather above never fired, so the tail's
     // finals would run over EVERY input position. Gather the output rows here so the isolated
     // "finals" measurement matches a real forward (prefill: only the last token → 1 lm_head row).
-    if (hparams.p2p_is_tail && n_run == 0) {
+    if (gather_in_loop && n_run == 0) {
         cur = ggml_get_rows(ctx0, cur, inp_out_ids);
     }
 
@@ -192,6 +205,13 @@ llama_model_openai_moe::graph::graph(const llama_model & model, const llm_graph_
         res->t_h_nextn = cur;
         ggml_build_forward_expand(gf, cur);
         return;
+    }
+
+    res->t_h_nextn = cur;
+
+    // Deferred gather: only when the in-loop one was skipped to keep t_h_nextn full-width.
+    if (!gather_in_loop && inp_out_ids) {
+        cur = ggml_get_rows(ctx0, cur, inp_out_ids);
     }
 
     cur = build_norm(cur,
