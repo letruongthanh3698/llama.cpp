@@ -2671,12 +2671,11 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             if (value < 0) {
                 throw std::invalid_argument("invalid value");
             }
-            for (int i = 0; i < value; ++i) {
-                // keep strings alive and avoid leaking memory by storing them in a static vector
-                static std::list<std::string> buft_overrides;
-                buft_overrides.push_back(llm_ffn_exps_block_regex(i));
-                params.tensor_buft_overrides.push_back({buft_overrides.back().c_str(), ggml_backend_cpu_buffer_type()});
-            }
+            // P2P: RECORD ONLY -- the expansion moved to the application (common_expand_n_cpu_moe),
+            // because the block indices depend on this device's layer slice and the slice is not known
+            // until after common_params_parse returns. Expanding here to blk.0..blk.(N-1) silently
+            // matched nothing on any slice that does not start at layer 0. See common.h.
+            params.n_cpu_moe = value;
         }
     ).set_env("LLAMA_ARG_N_CPU_MOE"));
     GGML_ASSERT(params.n_gpu_layers < 0); // string_format would need to be extended for a default >= 0

@@ -22,6 +22,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <list>        // P2P: stable-address string store for common_expand_n_cpu_moe's -ot patterns
 #include <regex>
 #include <sstream>
 #include <string>
@@ -1343,7 +1344,59 @@ std::vector<llama_adapter_lora_ptr> & common_init_result::lora() {
     return pimpl->lora;
 }
 
+void common_expand_n_cpu_moe(common_params & params) {
+    if (params.n_cpu_moe <= 0) {
+        return;
+    }
+    // The FIRST K BLOCKS OF THIS SLICE, named GLOBALLY. `-ncmoe` means "keep the first K layers' MoE
+    // weights on the CPU"; on a partitioned process "the first K layers" are the first K layers THIS
+    // DEVICE HOLDS, and their tensors carry global GGUF names (llama-model.cpp, p2p_global_il), so the
+    // patterns must read blk.<start+i>. Unpartitioned (start_layer < 0) this is blk.0.. as before.
+    const int base = params.start_layer > 0 ? params.start_layer : 0;
+    int n = params.n_cpu_moe;
+    // CLAMP TO THE SLICE. Without this `-ncmoe 24` on a 12-layer slice emits 12 patterns that match
+    // nothing beyond the slice, and the planner's memory model -- which believes 24 FFNs left VRAM --
+    // over-commits the device by exactly the difference.
+    if (params.end_layer > base) {
+        n = std::min(n, params.end_layer - base);
+    }
+    if (n < params.n_cpu_moe) {
+        LOG_WRN("%s: -ncmoe %d exceeds this device's slice [%d,%d); clamped to %d\n",
+                __func__, params.n_cpu_moe, base, params.end_layer, n);
+    }
+    params.n_cpu_moe = 0;      // idempotent: safe to call from both the app and common_init_from_params
+
+    // Rebuild the list rather than appending: common_params_parse PADS this vector with {nullptr,nullptr}
+    // up to llama_max_tensor_buft_overrides(), so the real patterns live at the FRONT and a plain
+    // push_back would land after the terminator, where nothing reads it.
+    std::vector<llama_model_tensor_buft_override> kept;
+    for (const auto & ov : params.tensor_buft_overrides) {
+        if (ov.pattern) {
+            kept.push_back(ov);
+        }
+    }
+    for (int i = 0; i < n; ++i) {
+        // The struct stores a RAW const char *, so the strings must outlive params -- same static-list
+        // idiom the arg callback used before the expansion moved here.
+        static std::list<std::string> buft_overrides;
+        buft_overrides.push_back(llm_ffn_exps_block_regex(base + i));
+        kept.push_back({ buft_overrides.back().c_str(), ggml_backend_cpu_buffer_type() });
+    }
+    const size_t ntbo = llama_max_tensor_buft_overrides();
+    while (kept.size() < ntbo || kept.empty() || kept.back().pattern != nullptr) {
+        kept.push_back({ nullptr, nullptr });
+    }
+    params.tensor_buft_overrides = std::move(kept);
+    LOG_INF("%s: -ncmoe -> MoE weights of blk.%d..blk.%d on CPU\n", __func__, base, base + n - 1);
+}
+
 common_init_result_ptr common_init_from_params(common_params & params, bool model_only) {
+    // Expand HERE, not in the arg callback: the block indices depend on params.start_layer, which the
+    // application stamps after common_params_parse returns. Doing it at this choke point means no entry
+    // point can silently lose the flag -- and it is idempotent, so an app that expands earlier (to get
+    // the override list validated before the load) is not double-counted.
+    common_expand_n_cpu_moe(params);
+
     common_init_result_ptr res(new common_init_result(params, model_only));
 
     llama_model * model = res->model();

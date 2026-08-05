@@ -476,6 +476,16 @@ struct common_params {
     int32_t end_layer          = -1;    // one-past-last transformer layer (exclusive)
     int32_t n_used_layers      = -1;    // number of layers to load (<=0 = all)
 
+    // P2P: `-ncmoe N` is RECORDED here and expanded LATER, by the application, once the slice above is
+    // known. It used to expand inside the arg callback into `blk\.0 .. blk\.(N-1)` -- but overrides match
+    // tensor NAMES, and a partitioned process creates its layers under GLOBAL names (p2p_global_il), so
+    // on a device holding [24,48) those patterns matched NOTHING: the flag parsed, the model loaded, the
+    // run succeeded, and not one byte moved to the CPU while the planner believed N FFNs had spilled.
+    // The slice is not known at parse time (the app stamps start/end_layer after common_params_parse),
+    // so deferring the expansion is the fix -- an offset applied in the callback is not available to it.
+    // 0 = the flag was not given. See docs/migration-notes/cpu-offload-nonunified.md.
+    int32_t n_cpu_moe          = 0;     // MoE layers of THIS SLICE to keep on the CPU
+
     int32_t main_gpu           = 0;     // the GPU that is used for scratch and small tensors
     float   tensor_split[128]  = {0};   // how split tensors should be distributed across GPUs
     bool    fit_params         = true;  // whether to fit unset model/context parameters to free device memory
@@ -923,6 +933,12 @@ private:
 };
 
 using common_init_result_ptr = std::unique_ptr<common_init_result>;
+
+// Turn `params.n_cpu_moe` into tensor-buft overrides for the first N blocks OF THIS DEVICE'S SLICE,
+// using GLOBAL block indices (overrides match tensor names, and a partitioned load names its layers
+// globally). Idempotent, and called from common_init_from_params so no entry point can miss it; call it
+// earlier only if you want to inspect or validate the resulting override list before the model loads.
+void common_expand_n_cpu_moe(common_params & params);
 
 common_init_result_ptr common_init_from_params(common_params & params, bool model_only = false);
 
