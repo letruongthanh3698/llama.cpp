@@ -1108,6 +1108,25 @@ inline std::string llm_ffn_exps_block_regex(int idx) {
     return string_format("blk\\.%d%s", idx, LLM_FFN_EXPS_REGEX);
 }
 
+// P2P: the DENSE counterpart of LLM_FFN_EXPS_REGEX. A dense model has no `_exps` tensors at all, so
+// `-ncmoe` matched NOTHING on one and spilled nothing while still reporting success -- verified on
+// DeepSeek-R1-Distill-Qwen-14B, whose only FFN weights are blk.N.ffn_{up,gate,down}.weight (0 matches
+// against the exps regex, 144 for qwen3moe). See llm_ffn_dense_block_regex's use in
+// common_expand_n_cpu_moe.
+//
+// The `\.weight` SUFFIX IS LOAD-BEARING, and is why adding this pattern is inert on a MoE model:
+// matching is std::regex_search (substring, llama-model-loader.cpp), so a bare `ffn_up` would also hit
+// `ffn_up_exps.weight` and `ffn_up_shexp.weight` and silently change what `-ncmoe` means for every MoE
+// corpus already measured. Anchored on `\.weight` it matches 0 qwen3moe tensors -- verified against the
+// GGUF before the change. `ffn_norm` is deliberately absent: it is tiny and pinning it to CPU would
+// force a CPU op mid-graph.
+const char * const LLM_FFN_DENSE_REGEX = "\\.ffn_(up|down|gate)\\.weight";
+
+inline std::string llm_ffn_dense_block_regex(int idx) {
+    // `blk\.%d\.` -- the trailing escaped dot is what stops blk.3 from also matching blk.30.
+    return string_format("blk\\.%d%s", idx, LLM_FFN_DENSE_REGEX);
+}
+
 inline llama_model_tensor_buft_override llm_ffn_exps_cpu_override() {
     return { LLM_FFN_EXPS_REGEX, ggml_backend_cpu_buffer_type() };
 }

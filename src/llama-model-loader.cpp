@@ -1156,6 +1156,7 @@ struct ggml_tensor * llama_model_loader::create_tensor(
             for (const auto * overrides = tensor_buft_overrides; overrides->pattern != nullptr; ++overrides) {
                 std::regex pattern(overrides->pattern);
                 if (std::regex_search(tensor_name, pattern)) {
+                    n_buft_override_hits++;   // P2P: see done_getting_tensors()'s no-op guard
                     if (overrides->buft == ggml_backend_cpu_buffer_type()) {
                         // when overriding to a CPU buffer, consider the extra buffer types
                         buft = select_weight_buft(hparams, t_meta, op, buft_list_cpu);
@@ -1325,6 +1326,34 @@ void llama_model_loader::done_getting_tensors(bool partial) const {
         LLAMA_LOG_DEBUG("%s: tensor '%s' (%s) (and %zu others) cannot be used with preferred buffer type %s, using %s instead\n",
             __func__, first_tensor_moved_name.c_str(), first_tensor_moved_type_name.c_str(), n_tensors_moved - 1,
             ggml_backend_buft_name(first_moved_from_buft), ggml_backend_buft_name(first_moved_to_buft));
+    }
+
+    // P2P: BUFFER-TYPE OVERRIDES THAT MATCH NOTHING ARE A HARD ERROR, not a shrug.
+    //
+    // `-ncmoe K` on a DENSE model expanded to `blk.i.ffn_*_exps` patterns that matched zero tensors:
+    // the model loaded entirely on the GPU, the bench measured the all-GPU cost, labelled it K, and
+    // exited 0. A whole offload corpus can be collected that way and look perfectly well-formed --
+    // there is no downstream check that can tell "K had no effect" from "K is cheap". So the only
+    // place it can be caught is here, where the match count is known.
+    //
+    // Scoped to a partial (sliced) load too: a device holding [start,end) legitimately sees patterns
+    // for blocks it does not own, but common_expand_n_cpu_moe clamps to the slice, so at least one
+    // pattern must still hit. Anything supplying -ot patterns deliberately expected to match nothing
+    // would trip this -- which is the intended trade: silence here has already cost more than a false
+    // positive would.
+    if (tensor_buft_overrides && tensor_buft_overrides[0].pattern && n_buft_override_hits == 0) {
+        std::string have;
+        int shown = 0;
+        for (const auto & kv : weights_map) {
+            if (kv.first.find("ffn") != std::string::npos && shown < 6) {
+                have += (shown++ ? ", " : "") + kv.first;
+            }
+        }
+        throw std::runtime_error(format(
+            "%s: tensor buffer-type overrides matched NOTHING (first pattern '%s'). The requested "
+            "offload did not happen and any measurement taken now would silently be the un-offloaded "
+            "cost. FFN tensors this model actually has: %s",
+            __func__, tensor_buft_overrides[0].pattern, have.empty() ? "(none found)" : have.c_str()));
     }
 }
 

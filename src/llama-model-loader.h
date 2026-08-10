@@ -113,6 +113,11 @@ struct llama_model_loader {
 
     std::map<ggml_backend_buffer_type_t, ggml_context_ptr, ggml_backend_buft_comparator> ctx_map;
 
+    // P2P: how many tensors an -ot / -ncmoe pattern actually matched. Zero, with patterns supplied, is
+    // the SILENT NO-OP that let `-ncmoe K` on a dense model report success while spilling nothing --
+    // done_getting_tensors() turns it into a hard failure.
+    size_t n_buft_override_hits = 0;
+
     // track tensors that had to be moved for debugging:
     size_t n_tensors_moved = 0;
     std::string first_tensor_moved_name;

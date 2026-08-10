@@ -1379,7 +1379,19 @@ void common_expand_n_cpu_moe(common_params & params) {
         // The struct stores a RAW const char *, so the strings must outlive params -- same static-list
         // idiom the arg callback used before the expansion moved here.
         static std::list<std::string> buft_overrides;
+        // TWO patterns per block: MoE experts AND dense FFN. A dense model has no `_exps` tensors, so
+        // the exps pattern alone matched NOTHING and `-ncmoe K` was a SILENT NO-OP -- it loaded
+        // everything on the GPU, measured the all-GPU cost at every K, and exited 0. Emitting both
+        // makes `-ncmoe K` mean "the FFN of the first K layers of this slice lives on the CPU"
+        // regardless of architecture, which is what every caller (bench, planner, the ring entry
+        // points) already assumes it means.
+        //
+        // ADDING THE DENSE PATTERN IS INERT ON MoE: it is anchored on `\.weight` and so matches 0
+        // qwen3moe tensors (checked against the GGUF), which is what makes this safe to do without
+        // re-measuring any MoE corpus. See llm_ffn_dense_block_regex in common.h.
         buft_overrides.push_back(llm_ffn_exps_block_regex(base + i));
+        kept.push_back({ buft_overrides.back().c_str(), ggml_backend_cpu_buffer_type() });
+        buft_overrides.push_back(llm_ffn_dense_block_regex(base + i));
         kept.push_back({ buft_overrides.back().c_str(), ggml_backend_cpu_buffer_type() });
     }
     const size_t ntbo = llama_max_tensor_buft_overrides();
@@ -1387,7 +1399,8 @@ void common_expand_n_cpu_moe(common_params & params) {
         kept.push_back({ nullptr, nullptr });
     }
     params.tensor_buft_overrides = std::move(kept);
-    LOG_INF("%s: -ncmoe -> MoE weights of blk.%d..blk.%d on CPU\n", __func__, base, base + n - 1);
+    LOG_INF("%s: -ncmoe -> FFN weights (MoE experts and/or dense) of blk.%d..blk.%d on CPU\n",
+            __func__, base, base + n - 1);
 }
 
 common_init_result_ptr common_init_from_params(common_params & params, bool model_only) {
