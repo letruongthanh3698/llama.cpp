@@ -1542,13 +1542,44 @@ bool ggml_rpc_p2p_send(const char * endpoint, int32_t cmd, int32_t client_id,
     if (out_len) { *out_len = 0; }
     // Persistent per-successor socket: the ring sends thousands of messages to the SAME endpoint, so
     // hold a strong ref (get_socket's cache is only weak -> would reconnect + re-HELLO every message).
-    // On any I/O failure we drop the entry so the next call reconnects. Guarded (single sender today,
-    // but keep it safe). The server already loops many commands per connection (rpc_serve_client).
+    // On any I/O failure we drop the entry so the next call reconnects.
+    //
+    // THE EXCHANGE MUST BE SERIALISED PER ENDPOINT, NOT JUST THE MAP LOOKUP.
+    //
+    // Every call below is send_rpc_cmd + recv_msg on ONE shared socket. `p2p_sock_mtx` used to guard
+    // only the map and was released before the exchange, so two threads sending to the same endpoint
+    // interleaved their frames: thread A read thread B's reply, then read a payload word as the next
+    // 8-byte length prefix. Observed 2026-08-11 as
+    //     "Failed to allocate input buffer of size 2027224563767"
+    // in client_sim, whose ARRIVAL thread submits ADD_PROMPT while its MAIN loop polls
+    // CHECK_PROGRESS_MULTI -- both request/response, same endpoint. Once desynchronised the socket
+    // never recovers: the client stops fetching results, completed clients hold their slots unfetched,
+    // admissions stop, and the GPU goes idle with requests outstanding. It looked exactly like a ring
+    // stall, and the request count at which it hit was arbitrary (54/100 on the run that exposed it).
+    //
+    // The old comment said "single sender today, but keep it safe" -- that reasoned about the MAP.
+    // The map was safe; the stream was not.
+    //
+    // Per-endpoint rather than one global lock: a ring node forwarding hidden state to its successor
+    // must not serialise behind an unrelated client poll. Lock order is (endpoint mtx -> p2p_sock_mtx)
+    // in the exchange and p2p_sock_mtx alone in the lookup, so there is no cycle.
     static std::mutex p2p_sock_mtx;
     static std::unordered_map<std::string, socket_ptr> p2p_sockets;
+    static std::unordered_map<std::string, std::shared_ptr<std::mutex>> p2p_ep_mtx;
     const std::string ep(endpoint);
     socket_ptr sock;
-    {
+    std::shared_ptr<std::mutex> ep_mtx;
+    {   // 1. the endpoint's exchange mutex only -- cheap, and never held during I/O
+        std::lock_guard<std::mutex> lock(p2p_sock_mtx);
+        auto mit = p2p_ep_mtx.find(ep);
+        if (mit == p2p_ep_mtx.end()) { ep_mtx = std::make_shared<std::mutex>(); p2p_ep_mtx[ep] = ep_mtx; }
+        else                         { ep_mtx = mit->second; }
+    }
+    // 2. Held across send AND recv: this is the frame boundary the desync violated.
+    std::lock_guard<std::mutex> xchg(*ep_mtx);
+    {   // 3. Resolve the socket INSIDE the exchange lock. Resolving it before would let a concurrent
+        //    failure drop_socket() the very handle this call is about to write to -- a stale-handle
+        //    race that only shows up after a connection error, i.e. exactly when things are worst.
         std::lock_guard<std::mutex> lock(p2p_sock_mtx);
         auto it = p2p_sockets.find(ep);
         if (it != p2p_sockets.end()) {
