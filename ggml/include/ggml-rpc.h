@@ -63,6 +63,14 @@ enum ggml_rpc_p2p_cmd {
     GGML_RPC_P2P_CMD_CHECK_PROGRESS    = 38, // client -> prefill head: poll one client's state
     GGML_RPC_P2P_CMD_GET_RESULT_CLIENT = 39, // client -> prefill head: fetch result META (text + timings)
     GGML_RPC_P2P_CMD_CHECK_PROGRESS_MULTI = 40, // client -> prefill head: poll MANY clients in ONE round trip
+    // --- MULTI-PREFILL (Phase 12). REQUEST/RESPONSE, device -> device.
+    //     A prefill replica's head asks the MAIN prefill node which decoder ring this client should go
+    //     to, and main answers with an index into the replica's own --decoder-topology list (so no
+    //     topology travels on the wire). Fired when the head begins the client's LAST prompt chunk, so
+    //     the round trip overlaps that chunk plus the propagation down the ring -- every node then knows
+    //     the target BEFORE it finishes its slice, which is what keeps Phase 12.0's early per-slice
+    //     shipping intact at any replica size.
+    GGML_RPC_P2P_CMD_PREFILL_ROUTE     = 41, // prefill head -> main: "which decoder ring?" (request/response)
 };
 
 // Handler invoked on the SERVER for any P2P command. `in`/`in_len` is the payload (client_id already
