@@ -610,7 +610,7 @@ extern "C" {
     // prefill node ships each decoder only the slice it owns. lo < 0 clears (dump all). Set before
     // llama_state_seq_get_data_ext, reset after; shared hparams => not thread-safe across instances.
     LLAMA_API void    llama_model_set_tagged_write_range(struct llama_model * model, int32_t lo, int32_t hi);
-    // P2P Case-3 delta: restrict the next DELTA KV dump to cells with position in [lo, hi) (the new
+    // P2P KV-resume delta: restrict the next DELTA KV dump to cells with position in [lo, hi) (the new
     // positions since the last sync). lo < 0 clears (dump all in-window cells). Set before
     // llama_state_seq_get_data_ext with LLAMA_STATE_SEQ_FLAGS_DELTA, reset after; shared hparams =>
     // not thread-safe across instances.
@@ -954,7 +954,7 @@ extern "C" {
 // leaving layers loaded by prior merges intact. The first load is a normal (non-MERGE) tagged load.
 #define LLAMA_STATE_SEQ_FLAGS_MERGE 8
 
-// P2P Case-3 delta (incremental, multi-turn). A DELTA dump ships only the cells whose position falls
+// P2P KV-resume delta (incremental, multi-turn). A DELTA dump ships only the cells whose position falls
 // in the write-side range set by llama_model_set_tagged_write_pos_range() (the positions added since
 // the last sync). SWA is handled for free: the writer already masks out-of-window cells per sub-cache,
 // so a sliding-window layer ships only its in-window delta while a full-attention layer ships the

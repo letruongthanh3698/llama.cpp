@@ -81,7 +81,7 @@ enum rpc_cmd {
     RPC_CMD_SET_HIDDEN_STATE = RPC_CMD_P2P_BASE,  // forward pre-norm hidden state to successor
     RPC_CMD_RETURN_TOKEN,                          // tail -> head: sampled token id
     RPC_CMD_SET_PREFILL_DATA,                      // prefill node -> decoder node: serialized KV slice
-    RPC_CMD_SET_DECODE_RESULT,                     // decoder node -> prefill origin: decode result push (Case 3)
+    RPC_CMD_SET_DECODE_RESULT,                     // decoder node -> prefill origin: decode result push (KV-resume)
     RPC_CMD_PREPARE,                               // device -> successor: advisory "prepare these clients" hint
     RPC_CMD_ADD_PROMPT,                            // client -> prefill head: submit a prompt (request/response)
     RPC_CMD_CHECK_PROGRESS,                        // client -> prefill head: poll state (request/response)

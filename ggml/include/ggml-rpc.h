@@ -55,7 +55,7 @@ enum ggml_rpc_p2p_cmd {
     GGML_RPC_P2P_CMD_SET_HIDDEN_STATE = 32,  // predecessor -> device: pre-norm hidden state (fire-and-forget)
     GGML_RPC_P2P_CMD_RETURN_TOKEN     = 33,  // tail -> head: sampled token id (fire-and-forget)
     GGML_RPC_P2P_CMD_SET_PREFILL_DATA = 34,  // prefill node -> decoder node: serialized KV slice (handoff)
-    GGML_RPC_P2P_CMD_SET_DECODE_RESULT = 35, // decoder node -> prefill origin: decode result push (Case 3, fire-and-forget)
+    GGML_RPC_P2P_CMD_SET_DECODE_RESULT = 35, // decoder node -> prefill origin: decode result push (KV-resume, fire-and-forget)
     GGML_RPC_P2P_CMD_PREPARE           = 36, // device -> successor: ADVISORY "prepare these clients" hint (fire-and-forget)
     // --- CLIENT ENTRY POINT (Phase 11.2). The only REQUEST/RESPONSE commands: an external client
     //     submits work and polls for it. The handler's *out/*out_len reply path carries the answer.

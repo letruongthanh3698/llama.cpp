@@ -2162,7 +2162,7 @@ void llama_kv_cache::state_write(llama_io_write_i & io, llama_seq_id seq_id, lla
             // later attention still needs (masked => logit drift / save-load-state diverges once the seq
             // exceeds n_swa; full window => bit-exact). The receiver reconstructs the ring buffer from the
             // actual positions (see state_read_meta). Base/full-attention is unaffected (is_masked_swa is a
-            // no-op when swa_type == NONE). This also covers the P2P Case-3 DELTA dump (was !delta_swa).
+            // no-op when swa_type == NONE). This also covers the P2P KV-resume DELTA dump (was !delta_swa).
             const bool delta  = (flags & LLAMA_STATE_SEQ_FLAGS_DELTA) != 0;
             const bool is_swa = swa_type != LLAMA_SWA_TYPE_NONE;
             if (add_cell && seq_id != -1 && !is_swa) {
@@ -2171,7 +2171,7 @@ void llama_kv_cache::state_write(llama_io_write_i & io, llama_seq_id seq_id, lla
                 add_cell = !is_masked;
             }
 
-            // P2P Case-3 DELTA pos-range filter: ship only cells whose position is in the write-side
+            // P2P KV-resume DELTA pos-range filter: ship only cells whose position is in the write-side
             // [lo,hi) range (the positions added this turn). Applies to BASE and SWA delta writes alike.
             const bool apply_pos = delta && hparams.p2p_tagged_write_pos_lo >= 0;
             if (add_cell && apply_pos) {
@@ -2603,7 +2603,7 @@ bool llama_kv_cache::state_read_meta(llama_io_read_i & io, uint32_t strm, uint32
 
     if (dest_seq_id != -1) {
         // single sequence
-        // P2P Case-3 DELTA append: the seq already holds [0,X); do NOT clear it. The incoming cells are
+        // P2P KV-resume DELTA append: the seq already holds [0,X); do NOT clear it. The incoming cells are
         // NEW positions [X,Y) which get placed beside the existing ones (rolling the SWA window forward),
         // reconstructing [0,Y). (Non-append = the stock load, which replaces the seq.)
         if (!append) {
@@ -2648,7 +2648,7 @@ bool llama_kv_cache::state_read_meta(llama_io_read_i & io, uint32_t strm, uint32
         }
 
         if (swa_type != LLAMA_SWA_TYPE_NONE) {
-            // P2P Case-3: an SWA sub-cache is a rolling RING BUFFER (physical cell = pos % size, head =
+            // P2P KV-resume: an SWA sub-cache is a rolling RING BUFFER (physical cell = pos % size, head =
             // (max+1) % size). find_slot() does NOT reproduce that geometry for a load — a batched call
             // drops cells into arbitrary evictable slots (gappy/mis-aligned window), and even replaying it
             // per cell drifts under eviction because its head-reset heuristic depends on the cache's fill

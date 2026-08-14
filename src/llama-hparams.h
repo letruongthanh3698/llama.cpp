@@ -84,7 +84,7 @@ struct llama_hparams {
     int32_t p2p_tagged_write_il_lo = -1;
     int32_t p2p_tagged_write_il_hi = -1;
 
-    // P2P Case-3 delta: restrict a DELTA KV dump to cells with position in [lo, hi) (the new positions
+    // P2P KV-resume delta: restrict a DELTA KV dump to cells with position in [lo, hi) (the new positions
     // since the last sync). -1 = no restriction (write all in-window cells). Transient, same lifetime /
     // thread-safety caveat as p2p_tagged_write_il_lo above.
     int32_t p2p_tagged_write_pos_lo = -1;
