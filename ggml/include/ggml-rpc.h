@@ -71,6 +71,7 @@ enum ggml_rpc_p2p_cmd {
     //     the target BEFORE it finishes its slice, which is what keeps Phase 12.0's early per-slice
     //     shipping intact at any replica size.
     GGML_RPC_P2P_CMD_PREFILL_ROUTE     = 41, // prefill head -> main: "which decoder ring?" (request/response)
+    GGML_RPC_P2P_CMD_PREFILL_DONE      = 42, // prefill head -> main: "I SHIPPED this client" (fire-and-forget)
 };
 
 // Handler invoked on the SERVER for any P2P command. `in`/`in_len` is the payload (client_id already
