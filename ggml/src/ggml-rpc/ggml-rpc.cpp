@@ -89,6 +89,7 @@ enum rpc_cmd {
     RPC_CMD_CHECK_PROGRESS_MULTI,                  // client -> prefill head: batched poll (request/response)
     RPC_CMD_PREFILL_ROUTE,                         // prefill head -> main: which decoder ring? (request/response)
     RPC_CMD_PREFILL_DONE,                          // prefill head -> main: I SHIPPED this client (fire-and-forget)
+    RPC_CMD_RING_ASSIGN,                           // prefill node -> ring successor: client -> decoder ring
     RPC_CMD_COUNT,
 };
 
@@ -111,6 +112,8 @@ static_assert((int) RPC_CMD_GET_RESULT_CLIENT == (int) GGML_RPC_P2P_CMD_GET_RESU
               "P2P command id must match the public ggml_rpc_p2p_cmd enum in ggml-rpc.h");
 static_assert((int) RPC_CMD_CHECK_PROGRESS_MULTI == (int) GGML_RPC_P2P_CMD_CHECK_PROGRESS_MULTI,
               "P2P command id must match the public ggml_rpc_p2p_cmd enum in ggml-rpc.h");
+static_assert((int) RPC_CMD_RING_ASSIGN == (int) GGML_RPC_P2P_CMD_RING_ASSIGN,
+              "RPC_CMD_RING_ASSIGN must match the public id");
 static_assert((int) RPC_CMD_PREFILL_DONE == (int) GGML_RPC_P2P_CMD_PREFILL_DONE,
               "RPC_CMD_PREFILL_DONE must match the public id");
 static_assert((int) RPC_CMD_PREFILL_ROUTE == (int) GGML_RPC_P2P_CMD_PREFILL_ROUTE,

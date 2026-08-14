@@ -72,6 +72,7 @@ enum ggml_rpc_p2p_cmd {
     //     shipping intact at any replica size.
     GGML_RPC_P2P_CMD_PREFILL_ROUTE     = 41, // prefill head -> main: "which decoder ring?" (request/response)
     GGML_RPC_P2P_CMD_PREFILL_DONE      = 42, // prefill head -> main: "I SHIPPED this client" (fire-and-forget)
+    GGML_RPC_P2P_CMD_RING_ASSIGN       = 43, // prefill node -> its ring successor: client -> decoder ring
 };
 
 // Handler invoked on the SERVER for any P2P command. `in`/`in_len` is the payload (client_id already
