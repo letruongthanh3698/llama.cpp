@@ -17,8 +17,12 @@ from .base import LazyTorchTensor, MmprojModel, ModelBase, TextModel, gguf, logg
 from .qwen import QwenModel
 
 
-@ModelBase.register("DeepseekOCRForCausalLM", "UnlimitedOCRForCausalLM")
+@ModelBase.register("DeepseekOCRForCausalLM")
+@ModelBase.example("deepseek-ai/DeepSeek-OCR")
 class DeepseekOCRVisionModel(MmprojModel):
+    # HF dynamic_preprocess() max_num, which differs per model
+    preproc_max_tiles = 9
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.clip_projector_type = gguf.VisionProjectorType.DEEPSEEKOCR
@@ -42,6 +46,9 @@ class DeepseekOCRVisionModel(MmprojModel):
             self.gguf_writer.add_vision_projector_scale_factor(proj_scale_factor)
         # @bluebread: there's no window_size in config but just add it here anyway
         self.gguf_writer.add_vision_window_size(self.hparams.get("window_size", 14))
+
+        self.gguf_writer.add_vision_preproc_min_tiles(2)
+        self.gguf_writer.add_vision_preproc_max_tiles(self.preproc_max_tiles)
 
         # SAM configuration
         sam_hparams = hparams['sam']
@@ -93,8 +100,17 @@ class DeepseekOCRVisionModel(MmprojModel):
         return super().filter_tensors((name, gen))
 
 
+@ModelBase.register("UnlimitedOCRForCausalLM")
+@ModelBase.example("baidu/Unlimited-OCR")
+class UnlimitedOCRVisionModel(DeepseekOCRVisionModel):
+    preproc_max_tiles = 32
+
+
 @ModelBase.register("DeepseekOCR2ForCausalLM")
+@ModelBase.example("deepseek-ai/DeepSeek-OCR-2")
 class DeepseekOCR2VisionModel(DeepseekOCRVisionModel):
+    preproc_max_tiles = 6
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.clip_projector_type = gguf.VisionProjectorType.DEEPSEEKOCR2
@@ -121,6 +137,7 @@ class DeepseekOCR2VisionModel(DeepseekOCRVisionModel):
 
 
 @ModelBase.register("DeepseekForCausalLM")
+@ModelBase.example("deepseek-ai/deepseek-moe-16b-chat")
 class DeepseekModel(TextModel):
     model_arch = gguf.MODEL_ARCH.DEEPSEEK
 
@@ -215,6 +232,7 @@ class DeepseekModel(TextModel):
     "YoutuForCausalLM",
     "YoutuVLForConditionalGeneration",
 )
+@ModelBase.example("deepseek-ai/DeepSeek-V2-Lite", "deepseek-ai/DeepSeek-V3")
 class DeepseekV2Model(TextModel):
     model_arch = gguf.MODEL_ARCH.DEEPSEEK2
 
@@ -444,14 +462,46 @@ class DeepseekV2Model(TextModel):
 
 
 @ModelBase.register("DeepseekV32ForCausalLM")
+@ModelBase.example("deepseek-ai/DeepSeek-V3.2-Exp")
 class DeepseekV32Model(DeepseekV2Model):
     model_arch = gguf.MODEL_ARCH.DEEPSEEK32
     skip_mtp = False
+    supports_mtp_export = True
+    _n_main_layers: int | None = None
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.block_count = self.hparams["num_hidden_layers"] + self.hparams.get("num_nextn_predict_layers", 0)
+        self.block_count = self.hparams["num_hidden_layers"]
+        if not self.no_mtp:
+            self.block_count += self.hparams.get("num_nextn_predict_layers", 0)
         self.tensor_map = gguf.get_tensor_name_map(self.model_arch, self.block_count)
+
+    def index_tensors(self, remote_hf_model_id: str | None = None):
+        type(self)._n_main_layers = self.hparams["num_hidden_layers"]
+        return super().index_tensors(remote_hf_model_id=remote_hf_model_id)
+
+    @classmethod
+    def filter_tensors(cls, item: tuple[str, Callable[[], Tensor]]) -> tuple[str, Callable[[], Tensor]] | None:
+        if (titem := super().filter_tensors(item)) is None:
+            return None
+        name, gen = titem
+
+        # DeepSeek V3.2 appends the NextN/MTP block past num_hidden_layers
+        # (model.layers.61 -> blk.61 in the 62-block file).
+        assert cls._n_main_layers is not None
+        is_mtp = (m := re.match(r"model\.layers\.(\d+)\.", name)) is not None and int(m.group(1)) >= cls._n_main_layers
+
+        # --no-mtp: drop the appended NextN block entirely.
+        if is_mtp and cls.no_mtp:
+            return None
+        # --mtp: keep ONLY NextN-block tensors plus the shared embeddings/
+        # norm/lm_head (so the resulting GGUF carries just the draft head).
+        if cls.mtp_only and not is_mtp and name not in (
+            "model.embed_tokens.weight", "model.norm.weight", "lm_head.weight",
+        ):
+            return None
+
+        return name, gen
 
     def set_vocab(self):
         from transformers import AutoTokenizer
@@ -463,7 +513,7 @@ class DeepseekV32Model(DeepseekV2Model):
         super().set_gguf_parameters()
 
         # NextN/MTP prediction layers
-        if (num_nextn_predict_layers := self.hparams.get("num_nextn_predict_layers")) is not None:
+        if not self.no_mtp and (num_nextn_predict_layers := self.hparams.get("num_nextn_predict_layers")) is not None:
             self.gguf_writer.add_nextn_predict_layers(num_nextn_predict_layers)
 
         # DSA indexer parameters
@@ -473,6 +523,7 @@ class DeepseekV32Model(DeepseekV2Model):
 
 
 @ModelBase.register("DeepseekV4ForCausalLM")
+@ModelBase.example("deepseek-ai/DeepSeek-V4-Flash-Base")
 class DeepseekV4Model(TextModel):
     model_arch = gguf.MODEL_ARCH.DEEPSEEK4
     supports_mtp_export = True
@@ -489,6 +540,13 @@ class DeepseekV4Model(TextModel):
         for key, value in raw_hparams.items():
             self.hparams.setdefault(key, value)
 
+        # workaround for special rope_parameters (main/compress) in transformers 5.x
+        if self.rope_parameters.get("full_attention", self.rope_parameters).get("rope_type") is None:
+            if (rope_scaling := raw_hparams.get("rope_scaling")) is not None:
+                if "rope_type" not in rope_scaling and (rope_type := rope_scaling.get("type")) is not None:
+                    rope_scaling["rope_type"] = rope_type
+                self.rope_parameters.update(**rope_scaling)
+
         self.block_count = self.hparams["num_hidden_layers"]
         if self.mtp_only:
             self.block_count += self.hparams.get("num_nextn_predict_layers", 0)
@@ -504,7 +562,10 @@ class DeepseekV4Model(TextModel):
             logger.info("Skipping %d DeepSeek-V4 MTP tensor(s) for conversion v0", type(self)._skipped_mtp_tensors)
 
         # add a default chat template; if the model has a built-in template, it will be overridden later
-        template_path = Path(__file__).parent.parent / "models" / "templates" / "deepseek-ai-DeepSeek-V4.jinja"
+        model_id_hint = self.remote_hf_model_id or self.dir_model.name
+        is_0731 = "0731" in model_id_hint
+        template_name = "deepseek-ai-DeepSeek-V4-Flash-0731.jinja" if is_0731 else "deepseek-ai-DeepSeek-V4.jinja"
+        template_path = Path(__file__).parent.parent / "models" / "templates" / template_name
         if template_path.is_file():
             with open(template_path, "r", encoding="utf-8") as f:
                 self.gguf_writer.add_chat_template(f.read())
@@ -517,6 +578,8 @@ class DeepseekV4Model(TextModel):
     @classmethod
     def filter_tensors(cls, item: tuple[str, Callable[[], Tensor]]) -> tuple[str, Callable[[], Tensor]] | None:
         name, gen = item
+        if name.startswith(("aligner.", "image_")):
+            return None
         if name.startswith("mtp."):
             if not cls.mtp_only:
                 cls._skipped_mtp_tensors += 1
@@ -655,31 +718,6 @@ class DeepseekV4Model(TextModel):
         for name in tensors_to_remove:
             del self.model_tensors[name]
 
-    @staticmethod
-    def _pack_mxfp4_blocks(weight: Tensor, scale: Tensor) -> np.ndarray:
-        packed = weight.contiguous().view(torch.uint8)
-        scale_u8 = scale.contiguous().view(torch.uint8)
-
-        out_features, packed_cols = packed.shape
-        logical_cols = packed_cols * 2
-        if logical_cols % 32 != 0:
-            raise ValueError(f"MXFP4 source row has {logical_cols} values, expected a multiple of 32")
-
-        n_blocks = logical_cols // 32
-        if tuple(scale_u8.shape) != (out_features, n_blocks):
-            raise ValueError(f"MXFP4 scale shape {tuple(scale_u8.shape)} does not match {(out_features, n_blocks)}")
-
-        src = packed.reshape(out_features, n_blocks, 16)
-        low = src & 0x0F
-        high = (src >> 4) & 0x0F
-
-        # The safetensors bytes store adjacent values as low/high nibbles.
-        # ggml MXFP4 blocks store values 0..15 in low nibbles and 16..31 in high nibbles.
-        vals = torch.stack((low, high), dim=-1).reshape(out_features, n_blocks, 32)
-        qs = vals[:, :, :16] | (vals[:, :, 16:] << 4)
-        raw = torch.cat((scale_u8.unsqueeze(-1), qs.to(torch.uint8)), dim=-1)
-        return raw.reshape(out_features, n_blocks * 17).cpu().numpy()
-
     def _write_mxfp4_expert_tensor(self, bid: int, proj: str, tensor_key: gguf.MODEL_TENSOR) -> list[str]:
         n_experts = self.hparams["n_routed_experts"]
         data: np.ndarray | None = None
@@ -693,7 +731,7 @@ class DeepseekV4Model(TextModel):
 
             weight = LazyTorchTensor.to_eager(self.model_tensors[weight_name]())
             scale = LazyTorchTensor.to_eager(self.model_tensors[scale_name]())
-            packed = self._pack_mxfp4_blocks(weight, scale)
+            packed = self.repack_mxfp4_blocks(weight, scale)
             if data is None:
                 data = np.empty((n_experts, *packed.shape), dtype=packed.dtype)
             data[eid] = packed
@@ -817,6 +855,7 @@ class DeepseekV4Model(TextModel):
             "ffn_norm.weight": (gguf.MODEL_TENSOR.FFN_NORM, ".weight"),
             "ffn.gate.weight": (gguf.MODEL_TENSOR.FFN_GATE_INP, ".weight"),
             "ffn.gate.bias": (gguf.MODEL_TENSOR.FFN_EXP_PROBS_B, ".bias"),
+            "ffn.gate.bias_vl": (gguf.MODEL_TENSOR.FFN_EXP_PROBS_B_VL, ".bias"),
             "ffn.gate.tid2eid": (gguf.MODEL_TENSOR.FFN_GATE_TID2EID, ".weight"),
             "ffn.shared_experts.w1.weight": (gguf.MODEL_TENSOR.FFN_GATE_SHEXP, ".weight"),
             "ffn.shared_experts.w2.weight": (gguf.MODEL_TENSOR.FFN_DOWN_SHEXP, ".weight"),
@@ -840,6 +879,10 @@ class DeepseekV4Model(TextModel):
 
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
         if re.match(r"layers\.\d+\.ffn\.experts\.\d+\.w[123]\.(weight|scale)$", name):
+            return []
+
+        # hash layers route text tokens via tid2eid and image tokens via bias_vl; gate.bias is unused
+        if name.endswith(".ffn.gate.bias") and bid is not None and bid < self.hparams["num_hash_layers"]:
             return []
 
         tensor_key, suffix = self._map_dsv4_tensor_name(name, bid)
@@ -882,6 +925,7 @@ class DeepseekV4Model(TextModel):
 
 
 @ModelBase.register("DeepseekV4DSparkModel")
+@ModelBase.example("deepseek-ai/DeepSeek-V4-Flash-DSpark")
 class DeepseekV4DSparkModel(DeepseekV4Model):
     model_arch = gguf.MODEL_ARCH.DFLASH
 
@@ -963,6 +1007,13 @@ class DeepseekV4DSparkModel(DeepseekV4Model):
             return self._DSPARK_ROOT_MAP[name]
         return super()._map_dsv4_tensor_name(name, bid)
 
+    def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
+        # the DFlash draft uses the plain exp-probs bias (ffn.gate.bias -> FFN_EXP_PROBS_B);
+        # the mtmd-only hash routing tensors (bias_vl, tid2eid) are not part of the DFLASH arch
+        if name.endswith(".ffn.gate.bias_vl"):
+            return
+        yield from super().modify_tensors(data_torch, name, bid)
+
     def set_vocab(self):
         if self.target_model_dir is None:
             raise ValueError("DeepSeek-V4 DSpark requires --target-model-dir with the target tokenizer")
@@ -981,3 +1032,73 @@ class DeepseekV4DSparkModel(DeepseekV4Model):
 
         self.gguf_writer.add_block_size(self.hparams["dspark_block_size"])
         self.gguf_writer.add_target_layers([layer + 1 for layer in self.hparams["dspark_target_layer_ids"]])
+
+
+@ModelBase.register("DeepseekV4ForCausalLM")
+@ModelBase.example("deepseek-ai/DeepSeek-V4-Flash-Vision-Exp")
+class DeepseekV4FlashVisionModel(MmprojModel):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        assert self.hparams_vision is not None
+        # no preprocessor_config.json in the repo; normalization is (x/255 - 0.5) / 0.5
+        # ref: inference/image_processor.py (load_image)
+        self.preprocessor_config = {
+            "image_mean": [0.5, 0.5, 0.5],
+            "image_std":  [0.5, 0.5, 0.5],
+            **self.preprocessor_config,
+        }
+
+    def get_vision_config(self) -> dict[str, Any] | None:
+        cfg = self.global_config
+        if cfg.get("vision_n_layers", 0) == 0:
+            raise ValueError("DeepseekV4FlashVisionModel requires vision_n_layers > 0 in the model config")
+        return {
+            "num_hidden_layers":   cfg["vision_n_layers"],
+            "hidden_size":         cfg["vision_dim"],
+            "num_attention_heads": cfg["vision_n_heads"],
+            "intermediate_size":   cfg["vision_inter_dim"],
+            "patch_size":          cfg["vision_patch_size"],
+            # dynamic resolution; only used for compat / warmup
+            "image_size":          cfg["vision_patch_size"] * cfg["vision_downsample_ratio"] * 16,
+            "rope_theta":          cfg.get("vision_rope_theta", 10000.0),
+            "downsample_ratio":    cfg["vision_downsample_ratio"],
+            "min_pixels":          cfg["vision_min_pixels"],
+        }
+
+    def set_gguf_parameters(self):
+        super().set_gguf_parameters()
+        assert self.hparams_vision is not None
+        self.gguf_writer.add_clip_projector_type(gguf.VisionProjectorType.DEEPSEEK4V)
+        # vision RMSNorm eps is the pytorch default, NOT the LLM's rms_norm_eps (1e-20)
+        # ref: inference/vision.py (RMSNorm)
+        self.gguf_writer.add_vision_attention_layernorm_eps(1e-6)
+        self.gguf_writer.add_vision_use_silu(True) # SwiGLU MLP
+        self.gguf_writer.add_vision_projector_scale_factor(self.hparams_vision["downsample_ratio"])
+        self.gguf_writer.add_vision_min_pixels(self.hparams_vision["min_pixels"])
+        # hardcoded on the C++ side (see PROJECTOR_TYPE_DEEPSEEK4V in clip.cpp)
+        # if future models use different values, add GGUF keys for those
+        assert self.global_config["vision_max_n_token"] == 384
+        assert self.global_config["vision_max_wh_ratio"] == 8
+
+    @classmethod
+    def filter_tensors(cls, item: tuple[str, Callable[[], Tensor]]) -> tuple[str, Callable[[], Tensor]] | None:
+        name, _ = item
+        if not (name.startswith(("vision.", "aligner.", "image_"))):
+            return None
+        return super().filter_tensors(item)
+
+    def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
+        assert self.hparams_vision is not None
+        if name == "vision.patch_embed.proj.weight":
+            # nn.Linear over flattened (3, p, p) patches == conv2d weight
+            p = self.hparams_vision["patch_size"]
+            data_torch = data_torch.reshape(data_torch.shape[0], 3, p, p)
+
+        if ".mlp.w1." in name:
+            # fused SwiGLU gate+up
+            gate, up = data_torch.chunk(2, dim=0)
+            yield from super().modify_tensors(gate, name.replace("w1", "w1_gate"), bid)
+            yield from super().modify_tensors(up, name.replace("w1", "w1_up"), bid)
+            return
+
+        yield from super().modify_tensors(data_torch, name, bid)
