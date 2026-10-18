@@ -73,6 +73,10 @@ enum ggml_rpc_p2p_cmd {
     GGML_RPC_P2P_CMD_PREFILL_ROUTE     = 41, // prefill head -> main: "which decoder ring?" (request/response)
     GGML_RPC_P2P_CMD_PREFILL_DONE      = 42, // prefill head -> main: "I SHIPPED this client" (fire-and-forget)
     GGML_RPC_P2P_CMD_RING_ASSIGN       = 43, // prefill node -> its ring successor: client -> decoder ring
+    // --- SPECULATIVE DECODING (MobiSys Gate B). Fire-and-forget; payloads in the app's src/tools/sd_wire.h.
+    GGML_RPC_P2P_CMD_SD_REGISTER       = 44, // drafter -> verifier: "I draft for this client" (k_max, reply address)
+    GGML_RPC_P2P_CMD_SD_DRAFT          = 45, // drafter -> verifier: draft tokens for stream length L
+    GGML_RPC_P2P_CMD_SD_VERDICT        = 46, // verifier -> drafter: tokens committed after verification
 };
 
 // Handler invoked on the SERVER for any P2P command. `in`/`in_len` is the payload (client_id already

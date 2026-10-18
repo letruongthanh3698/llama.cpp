@@ -96,6 +96,9 @@ enum rpc_cmd {
     RPC_CMD_PREFILL_ROUTE,                         // prefill head -> main: which decoder ring? (request/response)
     RPC_CMD_PREFILL_DONE,                          // prefill head -> main: I SHIPPED this client (fire-and-forget)
     RPC_CMD_RING_ASSIGN,                           // prefill node -> ring successor: client -> decoder ring
+    RPC_CMD_SD_REGISTER,                           // drafter -> verifier: I draft for this client (fire-and-forget)
+    RPC_CMD_SD_DRAFT,                              // drafter -> verifier: draft tokens (fire-and-forget)
+    RPC_CMD_SD_VERDICT,                            // verifier -> drafter: committed tokens (fire-and-forget)
     RPC_CMD_COUNT,
 };
 
@@ -122,6 +125,9 @@ static_assert((int) RPC_CMD_RING_ASSIGN == (int) GGML_RPC_P2P_CMD_RING_ASSIGN,
               "RPC_CMD_RING_ASSIGN must match the public id");
 static_assert((int) RPC_CMD_PREFILL_DONE == (int) GGML_RPC_P2P_CMD_PREFILL_DONE,
               "RPC_CMD_PREFILL_DONE must match the public id");
+static_assert((int) RPC_CMD_SD_REGISTER == (int) GGML_RPC_P2P_CMD_SD_REGISTER, "RPC_CMD_SD_REGISTER must match the public id");
+static_assert((int) RPC_CMD_SD_DRAFT    == (int) GGML_RPC_P2P_CMD_SD_DRAFT,    "RPC_CMD_SD_DRAFT must match the public id");
+static_assert((int) RPC_CMD_SD_VERDICT  == (int) GGML_RPC_P2P_CMD_SD_VERDICT,  "RPC_CMD_SD_VERDICT must match the public id");
 static_assert((int) RPC_CMD_PREFILL_ROUTE == (int) GGML_RPC_P2P_CMD_PREFILL_ROUTE,
               "P2P command id must match the public ggml_rpc_p2p_cmd enum in ggml-rpc.h");
 
@@ -1939,52 +1945,61 @@ bool ggml_rpc_p2p_send(const char * endpoint, int32_t cmd, int32_t client_id,
     }
     // 2. Held across send AND recv: this is the frame boundary the desync violated.
     std::lock_guard<std::mutex> xchg(*ep_mtx);
-    {   // 3. Resolve the socket INSIDE the exchange lock. Resolving it before would let a concurrent
-        //    failure drop_socket() the very handle this call is about to write to -- a stale-handle
-        //    race that only shows up after a connection error, i.e. exactly when things are worst.
-        std::lock_guard<std::mutex> lock(p2p_sock_mtx);
-        auto it = p2p_sockets.find(ep);
-        if (it != p2p_sockets.end()) {
-            sock = it->second;
-        } else {
-            sock = p2p_connect(endpoint);             // connect + HELLO once, then keep it alive
-            if (sock == nullptr) {
-                return false;
-            }
-            p2p_sockets[ep] = sock;
-        }
-    }
-    auto drop_socket = [&]() {
-        std::lock_guard<std::mutex> lock(p2p_sock_mtx);
-        auto it = p2p_sockets.find(ep);
-        if (it != p2p_sockets.end() && it->second == sock) {
-            p2p_sockets.erase(it);                    // dead connection; next send reconnects
-        }
-    };
+    // STALE CACHED SOCKET -> reconnect ONCE (2026-10-17, MobiSys SD). A cached socket outlives its peer
+    // when the peer process restarts on the same address -- a drafter (phone) does exactly that between
+    // requests. The first write into it "succeeds", the reply read then fails, and without this the
+    // message was simply lost. Only a CACHED socket is retried: a fresh connection that fails means the
+    // peer is really gone. A stale socket's peer no longer exists, so the retry cannot deliver twice.
     // wire payload = [client_id(4)][in bytes]
     std::vector<uint8_t> buf(sizeof(int32_t) + in_len);
     memcpy(buf.data(), &client_id, sizeof(int32_t));
     if (in_len > 0 && in != nullptr) {
         memcpy(buf.data() + sizeof(int32_t), in, in_len);
     }
-    if (!send_rpc_cmd(sock, (enum rpc_cmd) cmd, buf.data(), buf.size())) {
-        drop_socket();
-        return false;
-    }
-    std::vector<uint8_t> rsp;
-    if (!recv_msg(sock, rsp)) {
-        drop_socket();
-        return false;
-    }
-    if (out && out_len && !rsp.empty()) {
-        *out = (uint8_t *) malloc(rsp.size());
-        if (*out == nullptr) {
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        bool fresh = false;
+        {   // 3. Resolve the socket INSIDE the exchange lock. Resolving it before would let a concurrent
+            //    failure drop_socket() the very handle this call is about to write to -- a stale-handle
+            //    race that only shows up after a connection error, i.e. exactly when things are worst.
+            std::lock_guard<std::mutex> lock(p2p_sock_mtx);
+            auto it = p2p_sockets.find(ep);
+            if (it != p2p_sockets.end()) {
+                sock = it->second;
+            } else {
+                sock = p2p_connect(endpoint);             // connect + HELLO once, then keep it alive
+                if (sock == nullptr) {
+                    return false;
+                }
+                p2p_sockets[ep] = sock;
+                fresh = true;
+            }
+        }
+        auto drop_socket = [&]() {
+            std::lock_guard<std::mutex> lock(p2p_sock_mtx);
+            auto it = p2p_sockets.find(ep);
+            if (it != p2p_sockets.end() && it->second == sock) {
+                p2p_sockets.erase(it);                    // dead connection; next send reconnects
+            }
+        };
+        std::vector<uint8_t> rsp;
+        if (!send_rpc_cmd(sock, (enum rpc_cmd) cmd, buf.data(), buf.size()) || !recv_msg(sock, rsp)) {
+            drop_socket();
+            if (!fresh) {
+                continue;                                 // stale cached socket: reconnect once
+            }
             return false;
         }
-        memcpy(*out, rsp.data(), rsp.size());
-        *out_len = rsp.size();
+        if (out && out_len && !rsp.empty()) {
+            *out = (uint8_t *) malloc(rsp.size());
+            if (*out == nullptr) {
+                return false;
+            }
+            memcpy(*out, rsp.data(), rsp.size());
+            *out_len = rsp.size();
+        }
+        return true;
     }
-    return true;
+    return false;
 }
 
 // Handle one P2P command on the server: strip client_id, invoke the registered handler, reply.
