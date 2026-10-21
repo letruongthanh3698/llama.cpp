@@ -77,6 +77,10 @@ enum ggml_rpc_p2p_cmd {
     GGML_RPC_P2P_CMD_SD_REGISTER       = 44, // drafter -> verifier: "I draft for this client" (k_max, reply address)
     GGML_RPC_P2P_CMD_SD_DRAFT          = 45, // drafter -> verifier: draft tokens for stream length L
     GGML_RPC_P2P_CMD_SD_VERDICT        = 46, // verifier -> drafter: tokens committed after verification
+    // --- MobiSys C1f (2026-10-20): per-request parameters for routing by pool and prefill-side SD registration.
+    GGML_RPC_P2P_CMD_ADD_PROMPT_EX     = 47, // client -> prefill: ADD_PROMPT + n_predict, latency score, drafter (request/response)
+    GGML_RPC_P2P_CMD_CLIENT_PARAMS     = 48, // prefill -> decoder: n_predict + drafter registration, before the KV (fire-and-forget)
+    GGML_RPC_P2P_CMD_SD_VERDICT_BATCH  = 49, // verifier -> drafter: one pass's verdicts for the same drafter in ONE message
 };
 
 // Handler invoked on the SERVER for any P2P command. `in`/`in_len` is the payload (client_id already

@@ -67,6 +67,11 @@ struct llama_sampler * common_sampler_get(const struct common_sampler * gsmpl);
 //
 llama_token common_sampler_sample(struct common_sampler * gsmpl, struct llama_context * ctx, int idx, bool grammar_first = false);
 
+// P2P (2026-10-21): the same sampling as common_sampler_sample, from a logits row the caller already fetched (n_vocab
+// floats). It never touches the llama_context (no synchronize, no output reorder, no backend-sampler lookup), so several
+// samplers can run it on rows of ONE context in parallel threads. The caller synchronizes and fetches the rows first.
+llama_token common_sampler_sample_logits(struct common_sampler * gsmpl, const float * logits, int n_vocab, bool grammar_first = false);
+
 // generalized version of common_sampler_sample
 //
 // will cross-reference the sampled tokens with a batch of draft tokens and accept those that match

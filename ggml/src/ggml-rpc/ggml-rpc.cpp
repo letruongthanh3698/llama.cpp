@@ -99,6 +99,9 @@ enum rpc_cmd {
     RPC_CMD_SD_REGISTER,                           // drafter -> verifier: I draft for this client (fire-and-forget)
     RPC_CMD_SD_DRAFT,                              // drafter -> verifier: draft tokens (fire-and-forget)
     RPC_CMD_SD_VERDICT,                            // verifier -> drafter: committed tokens (fire-and-forget)
+    RPC_CMD_ADD_PROMPT_EX,                         // client -> prefill: prompt + per-request parameters (request/response)
+    RPC_CMD_CLIENT_PARAMS,                         // prefill -> decoder: per-request parameters (fire-and-forget)
+    RPC_CMD_SD_VERDICT_BATCH,                      // verifier -> drafter: several verdicts in one message (fire-and-forget)
     RPC_CMD_COUNT,
 };
 
@@ -128,6 +131,9 @@ static_assert((int) RPC_CMD_PREFILL_DONE == (int) GGML_RPC_P2P_CMD_PREFILL_DONE,
 static_assert((int) RPC_CMD_SD_REGISTER == (int) GGML_RPC_P2P_CMD_SD_REGISTER, "RPC_CMD_SD_REGISTER must match the public id");
 static_assert((int) RPC_CMD_SD_DRAFT    == (int) GGML_RPC_P2P_CMD_SD_DRAFT,    "RPC_CMD_SD_DRAFT must match the public id");
 static_assert((int) RPC_CMD_SD_VERDICT  == (int) GGML_RPC_P2P_CMD_SD_VERDICT,  "RPC_CMD_SD_VERDICT must match the public id");
+static_assert((int) RPC_CMD_ADD_PROMPT_EX == (int) GGML_RPC_P2P_CMD_ADD_PROMPT_EX, "RPC_CMD_ADD_PROMPT_EX must match the public id");
+static_assert((int) RPC_CMD_CLIENT_PARAMS == (int) GGML_RPC_P2P_CMD_CLIENT_PARAMS, "RPC_CMD_CLIENT_PARAMS must match the public id");
+static_assert((int) RPC_CMD_SD_VERDICT_BATCH == (int) GGML_RPC_P2P_CMD_SD_VERDICT_BATCH, "RPC_CMD_SD_VERDICT_BATCH must match the public id");
 static_assert((int) RPC_CMD_PREFILL_ROUTE == (int) GGML_RPC_P2P_CMD_PREFILL_ROUTE,
               "P2P command id must match the public ggml_rpc_p2p_cmd enum in ggml-rpc.h");
 
@@ -1966,7 +1972,11 @@ bool ggml_rpc_p2p_send(const char * endpoint, int32_t cmd, int32_t client_id,
             if (it != p2p_sockets.end()) {
                 sock = it->second;
             } else {
-                sock = p2p_connect(endpoint);             // connect + HELLO once, then keep it alive
+                // "host:port#tag" (MobiSys C1f, 2026-10-20): the tag only names a SEPARATE cached connection to host:port,
+                // so one process can hold several (an emulator standing in for many phones sends their drafts in
+                // parallel, as separate devices would). Connect to the part before '#'.
+                const std::string conn_ep = ep.substr(0, ep.find('#'));
+                sock = p2p_connect(conn_ep.c_str());      // connect + HELLO once, then keep it alive
                 if (sock == nullptr) {
                     return false;
                 }
