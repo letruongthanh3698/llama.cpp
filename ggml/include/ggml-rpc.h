@@ -81,6 +81,9 @@ enum ggml_rpc_p2p_cmd {
     GGML_RPC_P2P_CMD_ADD_PROMPT_EX     = 47, // client -> prefill: ADD_PROMPT + n_predict, latency score, drafter (request/response)
     GGML_RPC_P2P_CMD_CLIENT_PARAMS     = 48, // prefill -> decoder: n_predict + drafter registration, before the KV (fire-and-forget)
     GGML_RPC_P2P_CMD_SD_VERDICT_BATCH  = 49, // verifier -> drafter: one pass's verdicts for the same drafter in ONE message
+    // --- MobiSys C6 M2 (2026-10-28): the deployment controller changes a running decoder in place.
+    GGML_RPC_P2P_CMD_SET_RING_PARAMS   = 50, // main prefill -> decoder: admission cap, SD hold / coalesce cap / k cap (request/response)
+    GGML_RPC_P2P_CMD_SET_RING_TABLE    = 51, // main prefill -> prefill replicas: the decoder ring table after a switch (request/response)
 };
 
 // Handler invoked on the SERVER for any P2P command. `in`/`in_len` is the payload (client_id already

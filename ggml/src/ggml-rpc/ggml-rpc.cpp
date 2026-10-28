@@ -102,6 +102,8 @@ enum rpc_cmd {
     RPC_CMD_ADD_PROMPT_EX,                         // client -> prefill: prompt + per-request parameters (request/response)
     RPC_CMD_CLIENT_PARAMS,                         // prefill -> decoder: per-request parameters (fire-and-forget)
     RPC_CMD_SD_VERDICT_BATCH,                      // verifier -> drafter: several verdicts in one message (fire-and-forget)
+    RPC_CMD_SET_RING_PARAMS,                       // main prefill -> decoder: in-place lane parameters (request/response)
+    RPC_CMD_SET_RING_TABLE,                        // main prefill -> prefill replicas: the decoder ring table (request/response)
     RPC_CMD_COUNT,
 };
 
@@ -134,6 +136,8 @@ static_assert((int) RPC_CMD_SD_VERDICT  == (int) GGML_RPC_P2P_CMD_SD_VERDICT,  "
 static_assert((int) RPC_CMD_ADD_PROMPT_EX == (int) GGML_RPC_P2P_CMD_ADD_PROMPT_EX, "RPC_CMD_ADD_PROMPT_EX must match the public id");
 static_assert((int) RPC_CMD_CLIENT_PARAMS == (int) GGML_RPC_P2P_CMD_CLIENT_PARAMS, "RPC_CMD_CLIENT_PARAMS must match the public id");
 static_assert((int) RPC_CMD_SD_VERDICT_BATCH == (int) GGML_RPC_P2P_CMD_SD_VERDICT_BATCH, "RPC_CMD_SD_VERDICT_BATCH must match the public id");
+static_assert((int) RPC_CMD_SET_RING_PARAMS == (int) GGML_RPC_P2P_CMD_SET_RING_PARAMS, "RPC_CMD_SET_RING_PARAMS must match the public id");
+static_assert((int) RPC_CMD_SET_RING_TABLE == (int) GGML_RPC_P2P_CMD_SET_RING_TABLE, "RPC_CMD_SET_RING_TABLE must match the public id");
 static_assert((int) RPC_CMD_PREFILL_ROUTE == (int) GGML_RPC_P2P_CMD_PREFILL_ROUTE,
               "P2P command id must match the public ggml_rpc_p2p_cmd enum in ggml-rpc.h");
 
