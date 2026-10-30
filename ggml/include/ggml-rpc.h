@@ -84,6 +84,7 @@ enum ggml_rpc_p2p_cmd {
     // --- MobiSys C6 M2 (2026-10-28): the deployment controller changes a running decoder in place.
     GGML_RPC_P2P_CMD_SET_RING_PARAMS   = 50, // main prefill -> decoder: admission cap, SD hold / coalesce cap / k cap (request/response)
     GGML_RPC_P2P_CMD_SET_RING_TABLE    = 51, // main prefill -> prefill replicas: the decoder ring table after a switch (request/response)
+    GGML_RPC_P2P_CMD_RESUME_SAVE       = 52, // main prefill -> decoder: freeze + save its clients for a same-machine rebuild (request/response)
 };
 
 // Handler invoked on the SERVER for any P2P command. `in`/`in_len` is the payload (client_id already
