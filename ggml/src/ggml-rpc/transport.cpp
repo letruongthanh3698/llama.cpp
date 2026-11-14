@@ -645,6 +645,23 @@ static bool set_no_delay(sockfd_t sockfd) {
     return ret == 0;
 }
 
+// P2P (MobiSys, 2026-11-14): P2P_NET_QOS=voice tags every TCP socket of this process as interactive voice -- Apple
+// SO_NET_SERVICE_TYPE NET_SERVICE_TYPE_VO, elsewhere DSCP EF (IP_TOS 0xB8) -- so a phone on Wi-Fi gets the AP's highest WMM
+// access category, as VoIP / real-time game sockets do. Only a real phone's drafter sets it (Drafter_main --net-qos voice);
+// unset (every other process, SCARP) = no change. Best effort: a failing setsockopt is ignored.
+static void set_net_qos(sockfd_t sockfd) {
+    static const bool voice = [] { const char * e = getenv("P2P_NET_QOS"); return e && strcmp(e, "voice") == 0; }();
+    if (!voice) return;
+#ifdef SO_NET_SERVICE_TYPE
+    int st = NET_SERVICE_TYPE_VO;
+    (void) setsockopt(sockfd, SOL_SOCKET, SO_NET_SERVICE_TYPE, (char *)&st, sizeof(st));
+#endif
+#if !defined(_WIN32)
+    int tos = 0xB8;
+    (void) setsockopt(sockfd, IPPROTO_IP, IP_TOS, (char *)&tos, sizeof(tos));
+#endif
+}
+
 static bool set_reuse_addr(sockfd_t sockfd) {
     int flag = 1;
     int ret = setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, (char *)&flag, sizeof(int));
@@ -660,6 +677,7 @@ socket_ptr socket_t::accept() {
         GGML_LOG_ERROR("Failed to set TCP_NODELAY\n");
         return nullptr;
     }
+    set_net_qos(client_socket_fd);   // P2P (MobiSys): P2P_NET_QOS (see set_net_qos)
     return socket_ptr(new socket_t(std::make_unique<impl>(client_socket_fd)));
 }
 
@@ -714,6 +732,7 @@ socket_ptr socket_t::connect(const char * host, int port) {
         close_fd(sockfd);
         return nullptr;
     }
+    set_net_qos(sockfd);   // P2P (MobiSys): P2P_NET_QOS (see set_net_qos)
     struct sockaddr_in addr;
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
