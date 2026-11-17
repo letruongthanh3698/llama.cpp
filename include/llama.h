@@ -1067,6 +1067,9 @@ extern "C" {
             struct llama_context * ctx,
               struct llama_batch   batch);
 
+    // P2P (2026-11-16): number of sub-batches (ubatches) the last llama_decode ran; > 1 = the batch was split
+    LLAMA_API int32_t llama_n_ubatch_last(const struct llama_context * ctx);
+
     //
     // Extended batch API
     //

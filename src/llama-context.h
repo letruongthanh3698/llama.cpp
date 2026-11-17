@@ -191,6 +191,7 @@ struct llama_context {
     //
 
     llama_perf_context_data perf_get_data() const;
+    int32_t get_n_ubatch_last() const { return n_ubatch_last; }   // P2P (2026-11-16): llama_n_ubatch_last()
     void perf_reset();
 
     llama_memory_breakdown memory_breakdown() const;
@@ -403,4 +404,7 @@ private:
     mutable int32_t n_eval   = 0; // number of eval calls
 
     mutable int32_t n_reused = 0; // number of times the previous graph was reused
+
+    // P2P (2026-11-16): sub-batches (ubatches) the LAST decode() ran -- > 1 = llama_batch_allocr split the batch
+    int32_t n_ubatch_last = 0;
 };

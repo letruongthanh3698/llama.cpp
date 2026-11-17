@@ -1870,8 +1870,11 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
     int64_t n_outputs_prev = 0;
     int64_t n_tokens_prev  = 0;
 
+    n_ubatch_last = 0;   // P2P (2026-11-16): llama_n_ubatch_last()
+
     do {
         const auto & ubatch = mctx->get_ubatch();
+        n_ubatch_last++;
 
         // count the outputs in this ubatch
         {
@@ -3868,6 +3871,12 @@ void llama_free(llama_context * ctx) {
 
 uint32_t llama_n_ctx(const llama_context * ctx) {
     return ctx->n_ctx();
+}
+
+// P2P (2026-11-16): sub-batches the last llama_decode ran (1 = one ubatch; > 1 = the batch was split, e.g. split_equal on
+// per-sequence KV at a slot gap or unequal rows)
+int32_t llama_n_ubatch_last(const llama_context * ctx) {
+    return ctx->get_n_ubatch_last();
 }
 
 uint32_t llama_n_ctx_seq(const llama_context * ctx) {
