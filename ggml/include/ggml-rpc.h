@@ -85,6 +85,8 @@ enum ggml_rpc_p2p_cmd {
     GGML_RPC_P2P_CMD_SET_RING_PARAMS   = 50, // main prefill -> decoder: admission cap, SD hold / coalesce cap / k cap (request/response)
     GGML_RPC_P2P_CMD_SET_RING_TABLE    = 51, // main prefill -> prefill replicas: the decoder ring table after a switch (request/response)
     GGML_RPC_P2P_CMD_RESUME_SAVE       = 52, // main prefill -> decoder: freeze + save its clients for a same-machine rebuild (request/response)
+    // --- MobiSys 2026-11-17: a drafter's drafts for several clients of the same verifier in ONE message (SD_VERDICT_BATCH's twin)
+    GGML_RPC_P2P_CMD_SD_DRAFT_BATCH    = 53, // drafter -> verifier: one draft call's drafts for this verifier (fire-and-forget)
 };
 
 // Handler invoked on the SERVER for any P2P command. `in`/`in_len` is the payload (client_id already
